@@ -1,0 +1,26 @@
+[project]
+name = "ksj-mcp"
+version = "0.1.0"
+description = "KSJ v2.0 MCP server — turns journal photos into a searchable AI knowledge base"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Paul Chavez", email = "chavezhq@gmail.com" }]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0.0",
+]
+
+[project.scripts]
+ksj-mcp = "ksj_mcp.server:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ksj_mcp"]
