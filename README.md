@@ -57,6 +57,17 @@ Tesseract reads the text from your journal photos. It must be installed separate
 
 After installing, restart your terminal and AI client so the updated PATH is picked up.
 
+### Step 2.5 — Install uv
+
+`uvx` (used in Step 3) is part of **uv**, a fast Python package manager. Install it once:
+
+| Platform | Command |
+|----------|---------|
+| **Windows** | `winget install astral-sh.uv` or [download from astral.sh/uv](https://astral.sh/uv) |
+| **macOS/Linux** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+
+Verify with `uv --version` in a terminal before continuing.
+
 ### Step 3 — Register the server
 
 **Claude Desktop config file location:**
@@ -91,19 +102,40 @@ Save and restart your AI client. You should see **ksj** listed in the tools/inte
 
 ## Usage
 
-Once connected, talk to your AI assistant naturally:
+Once connected, talk to your AI assistant naturally.
 
+**Uploading:**
 > "Upload my journal photo from /Users/me/Desktop/RC-001.jpg"
 
+> "Process all the photos in my /Desktop/journal-scans folder"
+
+**Searching & browsing:**
 > "Search my notes for ideas about spaced repetition"
 
-> "What are my open questions about machine learning?"
+> "Show me everything tagged #machine-learning"
+
+> "What are my open questions about calculus?"
 
 > "Show me everything connected to RC-015"
 
+**Synthesis & review:**
+> "Which topics am I ready to synthesize into a SYN page?"
+
+> "Show me my breakthrough timeline"
+
+> "How is my understanding of #linear-algebra progressing?"
+
+**Dream Capture:**
+> "What symbols and themes keep appearing in my dreams?"
+
+> "Show me all my dream entries from this month"
+
+**Export & health:**
 > "Export all captures tagged #ai as Markdown"
 
-> "How many insights have I captured this month?"
+> "Generate a study deck from my open questions"
+
+> "How's my journal practice looking?"
 
 ---
 
