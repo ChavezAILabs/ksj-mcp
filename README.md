@@ -37,7 +37,7 @@ Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, 
 
 ---
 
-## Setup (3 steps)
+## Setup (4 steps)
 
 ### Step 1 — Install an MCP-compatible AI client
 
@@ -193,6 +193,10 @@ Install Tesseract (Step 2 above) and restart your AI client.
 **"Could not detect a template ID"**
 Make sure the template number (RC-001, SYN-001, etc.) is clearly visible in the photo. Try better lighting or a closer shot.
 
+**"RC-001 already exists in your knowledge base"**
+You're re-uploading a page that's already stored. To replace it with the new photo (e.g. after a cleaner retake), ask your AI assistant to upload with `force=True`:
+> "Upload /path/to/RC-001.jpg with force=True"
+
 **Server not appearing in tools panel**
 Check that `uv` is installed (`uv --version` in a terminal) and that the path in your config file is correct. On Windows, use forward slashes or escaped backslashes in the JSON.
 
@@ -200,14 +204,22 @@ Check that `uv` is installed (`uv --version` in a terminal) and that the path in
 
 ## Data location
 
-All your captures are stored locally at:
+All your captures are stored locally. The exact path depends on how you run the server:
 
+**Via uvx (recommended install):**
+
+| Platform | Path |
+|----------|------|
+| **Windows** | `%USERPROFILE%\.local\share\uv\tools\ksj-mcp\data\` |
+| **macOS/Linux** | `~/.local/share/uv/tools/ksj-mcp/data/` |
+
+**Files:**
 ```
-ksj-mcp/data/captures.db    (SQLite database)
-ksj-mcp/data/images/         (image copies, if saved)
+data/captures.db     (SQLite database — all your captures and tags)
+data/images/         (copies of uploaded journal photos)
 ```
 
-The `data/` directory is `.gitignore`d and never leaves your machine.
+Your data is never sent anywhere. The `data/` directory is `.gitignore`d and stays on your machine.
 
 ---
 
