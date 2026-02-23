@@ -114,18 +114,24 @@ Once connected, talk to your AI assistant naturally:
 | `upload_capture` | OCR a journal photo, parse the template, store it, highlight strongest connection |
 | `bulk_upload` | Process a whole folder of photos at once |
 | `search_captures` | Full-text search with optional tag and date filters |
+| `list_by_tag` | Browse all captures with a given tag or prefix |
 | `find_connections` | Show tag-overlap and `@`-reference connections for a capture |
 | `get_stats` | Overview: counts, top tags, open questions, insights, date range |
 | `export_captures` | Dump your knowledge base as Markdown or JSON |
 | `suggest_synthesis` | Find RC topic clusters ready to become a SYN entry |
 | `export_study_deck` | Export `?` questions as a portable CSV study deck (Anki, Quizlet, Notion, etc.) |
 | `journal_health` | KPI dashboard + coaching: velocity, synthesis ratio, review cadence, open questions |
+| `get_breakthroughs` | All SYN entries chronologically — your complete breakthrough timeline |
+| `dream_patterns` | Recurring symbols, emotions, motifs, and themes across DC pages |
+| `knowledge_progress` | Track Needs Work → Solid → Mastered progression from REV entries |
 
 ---
 
 ## Schema tag system
 
-Use these prefixes anywhere on your journal pages — the server extracts them automatically:
+Use these prefixes anywhere on your journal pages — the server extracts them automatically.
+
+**RC, SYN, REV pages:**
 
 | Prefix | Meaning | Example |
 |--------|---------|---------|
@@ -135,6 +141,15 @@ Use these prefixes anywhere on your journal pages — the server extracts them a
 | `?` | Open question | `?why-does-this-work` |
 | `$` | Key insight | `$breakthrough` |
 | `A→B` | Cause / effect | `study→retention` |
+
+**DC (Dream Capture) pages** use a dream-specific variant:
+
+| Prefix | Meaning | Example |
+|--------|---------|---------|
+| `#` | Dream theme | `#flying` |
+| `@` | Symbol or character | `@the-old-house` |
+| `!` | Recurring motif | `!falling` |
+| `*` | Sensory detail | `*cold-wind` |
 
 ---
 
