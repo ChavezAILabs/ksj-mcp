@@ -43,7 +43,7 @@ Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, 
 
 The fastest way to get started is **Claude Desktop** (free at claude.ai/download).
 
-For other MCP clients, consult their documentation for how to register a local MCP server, then use the config in Step 3.
+For other MCP clients, consult their documentation for how to register a local MCP server, then use the config in Step 4.
 
 ### Step 2 — Install Tesseract OCR
 
@@ -57,7 +57,7 @@ Tesseract reads the text from your journal photos. It must be installed separate
 
 After installing, restart your terminal and AI client so the updated PATH is picked up.
 
-### Step 2.5 — Install uv
+### Step 3 — Install uv
 
 `uvx` (used in Step 3) is part of **uv**, a fast Python package manager. Install it once:
 
@@ -68,7 +68,7 @@ After installing, restart your terminal and AI client so the updated PATH is pic
 
 Verify with `uv --version` in a terminal before continuing.
 
-### Step 3 — Register the server
+### Step 4 — Register the server
 
 **Claude Desktop config file location:**
 
@@ -210,7 +210,7 @@ All your captures are stored locally. The exact path depends on how you run the 
 
 | Platform | Path |
 |----------|------|
-| **Windows** | `%USERPROFILE%\.local\share\uv\tools\ksj-mcp\data\` |
+| **Windows** | `%APPDATA%\uv\tools\ksj-mcp\data\` |
 | **macOS/Linux** | `~/.local/share/uv/tools/ksj-mcp/data/` |
 
 **Files:**
