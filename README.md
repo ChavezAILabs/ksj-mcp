@@ -59,7 +59,7 @@ After installing, restart your terminal and AI client so the updated PATH is pic
 
 ### Step 3 — Install uv
 
-`uvx` (used in Step 3) is part of **uv**, a fast Python package manager. Install it once:
+`uvx` (used in Step 4) is part of **uv**, a fast Python package manager. Install it once:
 
 | Platform | Command |
 |----------|---------|
