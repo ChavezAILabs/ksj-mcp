@@ -74,12 +74,19 @@ Morning dream recording. Captures narrative, characters, symbols,
 emotions, sensory details, and waking life context.
 
 ## Schema Tag System
+RC, SYN, REV pages:
 - `#topic` — subject or theme
 - `@source` — origin of information
 - `!priority` — urgent or important
 - `?question` — open questions
 - `$insight` — breakthrough realization
 - `A→B` — cause/effect or connection
+
+DC (Dream Capture) pages use a dream-specific variant:
+- `#theme` — dream theme or subject
+- `@symbol` — recurring symbol or character
+- `!recurring` — recurring dream motif
+- `*sensory` — sensory detail (unique to DC)
 
 ## What You Can Do
 - Search and retrieve entries by tag, template, or concept
@@ -975,14 +982,19 @@ def dream_patterns() -> str:
     symbol_freq  = _word_freq(symbol_texts)
     emotion_freq = _word_freq(emotion_texts)
 
-    # Recurring # tags across DC entries
-    tag_freq: dict[str, int] = {}
-    for d in dc_entries:
-        for t in d["tags"]:
-            if t["prefix"] == "#":
-                key = t["value"]
-                tag_freq[key] = tag_freq.get(key, 0) + 1
-    recurring_tags = {k: v for k, v in sorted(tag_freq.items(), key=lambda x: -x[1]) if v > 1}
+    # Aggregate DC-specific tags by prefix
+    def _tag_freq_by_prefix(prefix: str) -> dict[str, int]:
+        freq: dict[str, int] = {}
+        for d in dc_entries:
+            for t in d["tags"]:
+                if t["prefix"] == prefix:
+                    freq[t["value"]] = freq.get(t["value"], 0) + 1
+        return {k: v for k, v in sorted(freq.items(), key=lambda x: -x[1]) if v > 1}
+
+    recurring_themes   = _tag_freq_by_prefix("#")   # #theme
+    recurring_symbols  = _tag_freq_by_prefix("@")   # @symbol
+    recurring_motifs   = _tag_freq_by_prefix("!")   # !recurring
+    recurring_sensory  = _tag_freq_by_prefix("*")   # *sensory
 
     lines = [
         f"Dream Pattern Analysis — {len(dc_entries)} DC entries\n" + "─" * 50,
@@ -991,22 +1003,34 @@ def dream_patterns() -> str:
 
     if symbol_freq:
         top_symbols = list(symbol_freq.items())[:10]
-        lines.append("\nRecurring symbols:")
+        lines.append("\nRecurring symbols (from text):")
         lines.append("  " + "  |  ".join(f"{w} ×{c}" for w, c in top_symbols))
     else:
         lines.append("\nRecurring symbols: (none detected yet)")
 
+    if recurring_symbols:
+        lines.append("\nTagged symbols (@):")
+        lines.append("  " + "  |  ".join(f"@{k} ×{v}" for k, v in list(recurring_symbols.items())[:10]))
+
     if emotion_freq:
         top_emotions = list(emotion_freq.items())[:10]
-        lines.append("\nRecurring emotions:")
+        lines.append("\nRecurring emotions (from text):")
         lines.append("  " + "  |  ".join(f"{w} ×{c}" for w, c in top_emotions))
     else:
         lines.append("\nRecurring emotions: (none detected yet)")
 
-    if recurring_tags:
-        lines.append("\nRecurring themes (# tags):")
+    if recurring_motifs:
+        lines.append("\nRecurring motifs (!):")
+        lines.append("  " + "  |  ".join(f"!{k} ×{v}" for k, v in list(recurring_motifs.items())[:10]))
+
+    if recurring_sensory:
+        lines.append("\nSensory details (*):")
+        lines.append("  " + "  |  ".join(f"*{k} ×{v}" for k, v in list(recurring_sensory.items())[:10]))
+
+    if recurring_themes:
+        lines.append("\nRecurring themes (#):")
         lines.append(
-            "  " + "  |  ".join(f"#{k} ×{v}" for k, v in list(recurring_tags.items())[:10])
+            "  " + "  |  ".join(f"#{k} ×{v}" for k, v in list(recurring_themes.items())[:10])
         )
     else:
         lines.append("\nRecurring themes: (tag more entries to detect themes)")

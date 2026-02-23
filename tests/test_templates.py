@@ -30,6 +30,10 @@ class TestExtractSchemaTags:
         tags = extract_schema_tags("!urgent deadline approaching")
         assert {"prefix": "!", "value": "urgent"} in tags
 
+    def test_star_tag_dc_sensory(self):
+        tags = extract_schema_tags("*cold-wind rushing past")
+        assert {"prefix": "*", "value": "cold-wind"} in tags
+
     def test_question_tag(self):
         tags = extract_schema_tags("?how-does-this-scale")
         assert {"prefix": "?", "value": "how-does-this-scale"} in tags

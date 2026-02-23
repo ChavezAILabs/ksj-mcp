@@ -16,10 +16,10 @@ from typing import Any
 
 # ── Schema tag extraction ─────────────────────────────────────────────────────
 
-# Matches:  #topic  @source  !priority  ?question  $insight
+# Matches:  #topic  @source  !priority  ?question  $insight  *sensory (DC)
 _INLINE_TAG = re.compile(
     r'(?<!\w)'                      # not preceded by word char
-    r'([#@!?$])'                    # prefix
+    r'([#@!?$*])'                   # prefix (* = DC sensory tag)
     r'([\w][\w\-\.\/]*)',           # value (letters, digits, hyphen, dot, slash)
     re.UNICODE,
 )
