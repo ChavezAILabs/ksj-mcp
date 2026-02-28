@@ -6,6 +6,8 @@ Turn your handwritten journal photos into a searchable, AI-powered knowledge bas
 
 > "Works great on paper. Magical with AI."
 
+**Get the journal:** [Knowledge Synthesis Journal v2.0 on Amazon](https://www.amazon.com/dp/B0GPW5WBZL)
+
 ---
 
 ## What it does
@@ -259,3 +261,5 @@ MIT — free to use, modify, and share.
 Created by **Chavez AI Labs LLC**
 paul@chavezailabs.com
 *"Personal knowledge operating system for the AI age"*
+
+**Get the journal:** [Knowledge Synthesis Journal v2.0](https://www.amazon.com/dp/B0GPW5WBZL) (Amazon)
