@@ -31,11 +31,33 @@ class OcrNotAvailableError(RuntimeError):
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+_WINDOWS_TESSERACT_CANDIDATES = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+]
+
+
+def _configure_tesseract_path(pytesseract) -> None:
+    """On Windows, auto-detect the Tesseract binary if it is not on PATH."""
+    import shutil
+    import sys
+
+    if sys.platform != "win32":
+        return
+    if shutil.which("tesseract"):
+        return  # already on PATH — nothing to do
+    for candidate in _WINDOWS_TESSERACT_CANDIDATES:
+        if Path(candidate).exists():
+            pytesseract.pytesseract.tesseract_cmd = candidate
+            return
+
+
 def _import_tesseract():
     """Lazy import so the server starts even when pytesseract is installed
     but the Tesseract binary itself is absent."""
     try:
         import pytesseract
+        _configure_tesseract_path(pytesseract)
         return pytesseract
     except ImportError as e:
         raise OcrNotAvailableError(e) from e

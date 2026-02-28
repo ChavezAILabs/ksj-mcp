@@ -18,6 +18,7 @@ KSJ MCP Server — FastMCP entry point.
 """
 
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,8 +104,19 @@ reading handwritten content.
 """.strip(),
 )
 
-_DB_PATH     = Path(__file__).parent.parent.parent / "data" / "captures.db"
-_IMAGES_DIR  = Path(__file__).parent.parent.parent / "data" / "images"
+def _data_dir() -> Path:
+    """Return the KSJ data directory.
+
+    Resolution order:
+    1. KSJ_DATA_DIR environment variable (absolute path)
+    2. ~/.ksj-mcp/  (stable across uvx runs and uv cache cleans)
+    """
+    env = os.environ.get("KSJ_DATA_DIR")
+    return Path(env) if env else Path.home() / ".ksj-mcp"
+
+
+_DB_PATH     = _data_dir() / "captures.db"
+_IMAGES_DIR  = _data_dir() / "images"
 
 init_db(_DB_PATH)
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)

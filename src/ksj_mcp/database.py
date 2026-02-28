@@ -8,13 +8,18 @@ Tables:
 """
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-# Runtime data directory lives next to the package root (created on first use)
-_DEFAULT_DB = Path(__file__).parent.parent.parent / "data" / "captures.db"
+# Runtime data directory — respects KSJ_DATA_DIR env var, falls back to ~/.ksj-mcp/
+_DEFAULT_DB = (
+    Path(os.environ["KSJ_DATA_DIR"]) / "captures.db"
+    if "KSJ_DATA_DIR" in os.environ
+    else Path.home() / ".ksj-mcp" / "captures.db"
+)
 
 
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
