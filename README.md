@@ -59,9 +59,11 @@ After installing, restart your AI client so the updated PATH is picked up.
 
 > **Windows note:** If you skip "Add to PATH", the server will still auto-detect Tesseract at the default install location (`C:\Program Files\Tesseract-OCR\`). Adding to PATH is recommended but not required.
 
-### Step 3 — Install uv
+### Step 3 — Install uv and the KSJ server
 
-`uvx` (used in Step 4) is part of **uv**, a fast Python package manager. Install it once:
+**uv** is a fast Python package manager used to install and run the KSJ server.
+
+**Install uv:**
 
 | Platform | Command |
 |----------|---------|
@@ -69,6 +71,21 @@ After installing, restart your AI client so the updated PATH is picked up.
 | **macOS/Linux** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 
 Verify with `uv --version` in a terminal before continuing.
+
+**Install the KSJ server** (run once in a terminal):
+
+```
+uv tool install --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
+```
+
+This installs `ksj-mcp` as a persistent command on your machine. Git must be installed for this step (Windows: [Git for Windows](https://git-scm.com/download/win)).
+
+Verify with `ksj-mcp --help` — if it shows a help message, the install worked.
+
+**To update later:**
+```
+uv tool upgrade ksj-mcp
+```
 
 ### Step 4 — Register the server
 
@@ -79,24 +96,17 @@ Verify with `uv --version` in a terminal before continuing.
 | **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` |
 | **macOS/Linux** | `~/.config/claude/claude_desktop_config.json` |
 
-Add the following block (copy exactly — no path to set):
+Add the following block:
 
 ```json
 {
   "mcpServers": {
     "ksj": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/ChavezAILabs/ksj-mcp",
-        "ksj-mcp"
-      ]
+      "command": "ksj-mcp"
     }
   }
 }
 ```
-
-`uvx` downloads and runs the server automatically — nothing else to install.
 
 Save and restart your AI client. You should see **ksj** listed in the tools/integrations panel.
 
@@ -200,10 +210,10 @@ You're re-uploading a page that's already stored. To replace it with the new pho
 > "Upload /path/to/RC-001.jpg with force=True"
 
 **"Server transport closed unexpectedly" / server not starting**
-This usually means a stale uv cache. Run `uv cache clean` in a terminal, then restart your AI client. The server will re-download automatically on the next start.
+Run `ksj-mcp --help` in a terminal. If that works, the issue is with the Claude Desktop config — double-check it is valid JSON with `"command": "ksj-mcp"`. If `ksj-mcp` is not found, re-run the install command from Step 3.
 
 **Server not appearing in tools panel**
-Check that `uv` is installed (`uv --version` in a terminal) and that the config file is valid JSON. On Windows, use forward slashes or escaped backslashes in paths.
+Confirm `ksj-mcp --help` works in a terminal, verify the config file is valid JSON, and restart Claude Desktop after saving any config changes.
 
 ---
 
