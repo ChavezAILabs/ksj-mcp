@@ -1,8 +1,9 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-13 tools:
+14 tools:
   upload_capture     — OCR a journal photo and store it
+  manual_capture     — Log a capture from transcribed text (no OCR needed)
   bulk_upload        — Process a whole folder of photos at once
   search_captures    — Full-text search with optional filters
   list_by_tag        — Browse all captures with a given tag or prefix
@@ -45,7 +46,7 @@ from .database import (
     get_connection,
 )
 from .connections import build_connections
-from .ocr import OcrNotAvailableError, extract_text
+from .ocr import OcrNotAvailableError, detect_template_type, extract_text
 from .templates import parse_template
 
 # ── Server init ───────────────────────────────────────────────────────────────
@@ -345,6 +346,128 @@ def upload_capture(image_path: str, force: bool = False) -> str:
     """
     result = _process_image(image_path, force=force)
     return _format_upload_result(result, image_path)
+
+
+# ── Tool: manual_capture ──────────────────────────────────────────────────────
+
+@mcp.tool()
+def manual_capture(text: str, template_id: str = "", force: bool = False) -> str:
+    """
+    Log a journal capture from transcribed text, bypassing OCR entirely.
+
+    Use this when upload_capture cannot access the image file — for example
+    when the file path is not reachable by the MCP server process. Provide
+    the text you have already read or transcribed from the journal page.
+
+    Args:
+        text:        The transcribed content of the journal page (all fields
+                     you can read — First Impressions, Key Points, Tags, etc.).
+        template_id: Template ID (e.g. "RC-001"). If omitted, the server will
+                     try to detect it from the text automatically.
+        force:       Set to True to overwrite an existing capture with the
+                     same template ID (default False — warns instead).
+
+    Returns the same summary as upload_capture, including any connections
+    detected to existing captures.
+    """
+    # Detect template ID from text if caller did not provide one
+    if template_id:
+        template_type, tid = detect_template_type(template_id)
+        if template_type == "UNKNOWN":
+            # Caller passed something like "RC-001" — try matching directly
+            template_type, tid = detect_template_type(template_id.upper())
+        if template_type == "UNKNOWN":
+            return (
+                f"Could not parse template ID '{template_id}'. "
+                "Expected format: RC-001, SYN-003, REV-002, DC-005, etc."
+            )
+    else:
+        template_type, tid = detect_template_type(text)
+        if template_type == "UNKNOWN":
+            return (
+                "Could not detect a template ID (RC-XXX / SYN-XXX / REV-XXX / DC-XXX) "
+                "in the provided text. Please pass template_id explicitly, "
+                "e.g. template_id=\"RC-001\"."
+            )
+
+    result = {
+        "ok": False, "error": None, "capture_id": None,
+        "template_id": tid, "summary": "", "tags": [],
+        "confidence": 1.0, "connections": [], "highlight": None,
+        "duplicate": None, "stored_image": "",
+        "_low_conf": "",
+    }
+
+    with _db() as con:
+        existing = check_duplicate(con, tid)
+        if existing and not force:
+            result["duplicate"] = existing
+            result["error"] = (
+                f"{tid} already exists in your knowledge base "
+                f"(stored {existing['created_at'][:10]}, #{existing['id']}).\n"
+                f"  Summary: {existing['summary'] or '(none)'}\n\n"
+                f"To replace it, call manual_capture again with force=True."
+            )
+            return _format_upload_result(result, "")
+
+        parsed  = parse_template(template_type, text)
+        summary = parsed["summary"]
+        tags    = parsed["tags"]
+
+        result["summary"] = summary
+        result["tags"]    = tags
+
+        capture_id = insert_capture(
+            con,
+            type_=template_type,
+            template_id=tid,
+            content=parsed["fields"],
+            raw_ocr=text,
+            summary=summary,
+            confidence=1.0,
+            image_path="",
+        )
+        insert_tags(con, capture_id, tags)
+        con.commit()
+
+        connections = build_connections(con, capture_id)
+
+        highlight = None
+        if connections:
+            def _score(c):
+                age_days = 0
+                other_cap = get_capture(con, c["connected_id"])
+                if other_cap:
+                    try:
+                        dt = datetime.fromisoformat(other_cap["created_at"])
+                        age_days = (datetime.now(timezone.utc) - dt).days
+                    except Exception:
+                        pass
+                return (c["strength"], age_days)
+
+            best  = max(connections, key=_score)
+            other = get_capture(con, best["connected_id"])
+            if other:
+                age_days = 0
+                try:
+                    dt = datetime.fromisoformat(other["created_at"])
+                    age_days = (datetime.now(timezone.utc) - dt).days
+                except Exception:
+                    pass
+                highlight = {
+                    "template_id": other["template_id"],
+                    "summary":     other["summary"],
+                    "strength":    best["strength"],
+                    "age_days":    age_days,
+                    "shared_tags": best.get("shared_tags", []),
+                    "method":      best["method"],
+                }
+
+    result["ok"]          = True
+    result["capture_id"]  = capture_id
+    result["connections"] = connections
+    result["highlight"]   = highlight
+    return _format_upload_result(result, "")
 
 
 # ── Tool: bulk_upload ─────────────────────────────────────────────────────────
