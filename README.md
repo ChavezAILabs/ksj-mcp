@@ -55,7 +55,9 @@ Tesseract reads the text from your journal photos. It must be installed separate
 | **macOS** | `brew install tesseract` |
 | **Linux** | `sudo apt install tesseract-ocr` |
 
-After installing, restart your terminal and AI client so the updated PATH is picked up.
+After installing, restart your AI client so the updated PATH is picked up.
+
+> **Windows note:** If you skip "Add to PATH", the server will still auto-detect Tesseract at the default install location (`C:\Program Files\Tesseract-OCR\`). Adding to PATH is recommended but not required.
 
 ### Step 3 — Install uv
 
@@ -197,29 +199,46 @@ Make sure the template number (RC-001, SYN-001, etc.) is clearly visible in the 
 You're re-uploading a page that's already stored. To replace it with the new photo (e.g. after a cleaner retake), ask your AI assistant to upload with `force=True`:
 > "Upload /path/to/RC-001.jpg with force=True"
 
+**"Server transport closed unexpectedly" / server not starting**
+This usually means a stale uv cache. Run `uv cache clean` in a terminal, then restart your AI client. The server will re-download automatically on the next start.
+
 **Server not appearing in tools panel**
-Check that `uv` is installed (`uv --version` in a terminal) and that the path in your config file is correct. On Windows, use forward slashes or escaped backslashes in the JSON.
+Check that `uv` is installed (`uv --version` in a terminal) and that the config file is valid JSON. On Windows, use forward slashes or escaped backslashes in paths.
 
 ---
 
 ## Data location
 
-All your captures are stored locally. The exact path depends on how you run the server:
-
-**Via uvx (recommended install):**
+All your captures are stored locally in `~/.ksj-mcp/`:
 
 | Platform | Path |
 |----------|------|
-| **Windows** | `%APPDATA%\uv\tools\ksj-mcp\data\` |
-| **macOS/Linux** | `~/.local/share/uv/tools/ksj-mcp/data/` |
+| **Windows** | `C:\Users\<you>\.ksj-mcp\` |
+| **macOS/Linux** | `~/.ksj-mcp/` |
 
 **Files:**
 ```
-data/captures.db     (SQLite database — all your captures and tags)
-data/images/         (copies of uploaded journal photos)
+~/.ksj-mcp/captures.db     (SQLite database — all your captures and tags)
+~/.ksj-mcp/images/         (copies of uploaded journal photos)
 ```
 
-Your data is never sent anywhere. The `data/` directory is `.gitignore`d and stays on your machine.
+Your data is never sent anywhere and persists across updates.
+
+**Custom location:** Set the `KSJ_DATA_DIR` environment variable in your config to store data elsewhere:
+
+```json
+{
+  "mcpServers": {
+    "ksj": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/ChavezAILabs/ksj-mcp", "ksj-mcp"],
+      "env": {
+        "KSJ_DATA_DIR": "C:\\Users\\you\\Documents\\ksj-data"
+      }
+    }
+  }
+}
+```
 
 ---
 
