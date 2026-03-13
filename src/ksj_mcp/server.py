@@ -1,7 +1,7 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-14 tools:
+16 tools:
   upload_capture     — OCR a journal photo and store it
   manual_capture     — Log a capture from transcribed text (no OCR needed)
   bulk_upload        — Process a whole folder of photos at once
@@ -16,6 +16,8 @@ KSJ MCP Server — FastMCP entry point.
   get_breakthroughs  — All SYN entries chronologically with insights
   dream_patterns     — Recurring symbols, emotions, themes across DC pages
   knowledge_progress — REV knowledge status progression by topic
+  extract_insights   — Load DB context for AI extraction of a research session
+  commit_aiex        — Write confirmed AIEX insights to the knowledge base
 """
 
 import json
@@ -33,6 +35,7 @@ from .database import (
     get_connections,
     get_dc_pattern_data,
     get_journal_kpis,
+    get_next_aiex_id,
     get_question_captures,
     get_rc_tag_clusters,
     get_rev_progress,
@@ -42,6 +45,7 @@ from .database import (
     insert_capture,
     insert_tags,
     list_captures,
+    migrate_add_aiex,
     search_fts,
     get_connection,
 )
@@ -74,6 +78,12 @@ Needs Work → Solid → Mastered. Left page: quad ruled grid.
 **Dream Capture (DC-001 to DC-008)**
 Morning dream recording. Captures narrative, characters, symbols,
 emotions, sensory details, and waking life context.
+
+**AI Insight Extraction (AIEX-001, AIEX-002, ...)**
+AI-assisted extraction of high-value insights from research sessions.
+Entries are generated digitally (no OCR) and written directly to the
+database. Each confirmed insight gets its own sequential AIEX-NNN ID.
+Use extract_insights() to prepare a session, then commit_aiex() to store.
 
 ## Schema Tag System
 RC, SYN, REV pages:
@@ -120,6 +130,7 @@ _DB_PATH     = _data_dir() / "captures.db"
 _IMAGES_DIR  = _data_dir() / "images"
 
 init_db(_DB_PATH)
+migrate_add_aiex(_DB_PATH)
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
@@ -643,7 +654,7 @@ def get_stats() -> str:
     by_type = stats["by_type"]
     type_lines = "\n".join(
         f"  {t}: {by_type.get(t, 0)}"
-        for t in ("RC", "SYN", "REV", "DC")
+        for t in ("RC", "SYN", "REV", "DC", "AIEX")
     )
     top_tags = "\n".join(
         f"  {r['tag']}  ({r['cnt']} captures)"
@@ -1254,6 +1265,286 @@ def knowledge_progress(topic: str = "") -> str:
             f"{counts.get('Needs Work',0)} Needs Work"
         )
 
+    return "\n".join(lines)
+
+
+# ── Tool: extract_insights ────────────────────────────────────────────────────
+
+@mcp.tool()
+def extract_insights(session_text: str, source_platform: str = "") -> str:
+    """
+    Prepare an AI research session for insight extraction.
+
+    Loads knowledge base context (existing tags, potentially related entries)
+    and returns it alongside the session text and extraction instructions.
+    Claude then performs the extraction in its response to the user.
+
+    This tool does NOT write to the database. After the user reviews the
+    extracted insights, call commit_aiex() to store confirmed entries.
+
+    Trigger phrases: "Extract insights from this session", "Run AIEX on this
+    conversation", "Generate insight extraction report".
+
+    Args:
+        session_text:    Full or partial transcript of the research session.
+        source_platform: Platform where session occurred (e.g. "Claude Desktop",
+                         "Claude Mobile"). Leave blank if unknown.
+
+    Returns a context block + extraction instructions for Claude to process.
+    """
+    if not session_text.strip():
+        return "Please provide session_text to extract insights from."
+
+    with _db() as con:
+        stats = db_get_stats(con)
+
+        # Top tags for context
+        top_tags = "  ".join(
+            f"{r['tag']}" for r in stats["top_tags"][:15]
+        )
+
+        # Search for related entries using the first few words of the session
+        related = []
+        try:
+            words = [w for w in session_text[:300].split() if len(w) > 4][:5]
+            if words:
+                related = search_fts(con, query=" ".join(words[:3]), limit=5)
+        except Exception:
+            pass
+
+    total    = stats["total_captures"]
+    by_type  = stats["by_type"]
+    type_str = "  ".join(
+        f"{t}: {by_type.get(t, 0)}"
+        for t in ("RC", "SYN", "REV", "DC", "AIEX")
+    )
+    platform_line = f"**Platform:** {source_platform}" if source_platform else "**Platform:** (unspecified)"
+
+    related_block = ""
+    if related:
+        rel_lines = []
+        for r in related:
+            tag_str = " ".join(f"{t['prefix']}{t['value']}" for t in r.get("tags", [])[:4])
+            rel_lines.append(
+                f"  - {r['template_id']} — \"{r['summary'][:80] or '(no summary)'}\""
+                + (f"  |  {tag_str}" if tag_str else "")
+            )
+        related_block = "\n### Potentially related existing entries:\n" + "\n".join(rel_lines)
+
+    tag_block = (f"\n### Active knowledge base tags:\n  {top_tags}") if top_tags else ""
+
+    session_body = session_text[:8000]
+    truncated    = (
+        "\n*(session truncated to 8000 characters — paste earlier or key passages if needed)*"
+        if len(session_text) > 8000 else ""
+    )
+
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    return f"""## KSJ — AI Insight Extraction
+{platform_line}
+**Knowledge base:** {total} capture(s)  ({type_str})
+{related_block}{tag_block}
+
+---
+
+### Session to Process:
+
+{session_body}{truncated}
+
+---
+
+### Extraction Instructions
+
+Extract all high-value insights from the session above. For each insight:
+
+1. Write a concise statement (1–3 sentences capturing the core idea)
+2. Assign confidence tier using Cirlot's color symbolism:
+   - 🟢 **Seed** — organic potential, not yet in motion (interesting direction, needs development)
+   - 🔴 **Developing** — active energy, transformation underway (substantive, worth pursuing soon)
+   - 🟡 **Strong** — solar illumination, highest realization (specific, novel, act now)
+3. Add `#topic` tags (and `@source`, `?question`, `$insight` where applicable)
+4. Note connections to existing entries listed above
+
+Also extract:
+- **Open questions** worth pursuing
+- **Action items** (include priority `!` for urgent items)
+
+Present the extraction as a structured review for user approval, then call \
+`commit_aiex()` with the confirmed JSON:
+
+```json
+{{
+  "entry_type": "AIEX-001",
+  "date": "{today}",
+  "source_platform": "{source_platform}",
+  "session_focus": "<session topic in 5–10 words>",
+  "insights": [
+    {{
+      "text": "<insight text>",
+      "confidence_tier": "Seed | Developing | Strong",
+      "tags": ["#topic1", "#topic2"],
+      "connections": ["<connection to existing entry if applicable>"]
+    }}
+  ],
+  "open_questions": ["<question 1>"],
+  "action_items": [{{"text": "<action>", "priority": "!", "status": "open"}}]
+}}
+```
+
+No database writes occur until `commit_aiex()` is called with confirmed data."""
+
+
+# ── Tool: commit_aiex ─────────────────────────────────────────────────────────
+
+@mcp.tool()
+def commit_aiex(session_json: str) -> str:
+    """
+    Write confirmed AIEX insights to the knowledge base.
+
+    Takes a JSON string conforming to the AIEX-001 schema and stores each
+    confirmed insight as a separate AIEX-NNN entry. IDs are assigned
+    sequentially at write time. All entries are tagged as AI-Extracted.
+
+    Call this after the user has reviewed and approved the output from
+    extract_insights().
+
+    Args:
+        session_json: JSON string with fields: entry_type, date,
+                      source_platform, session_focus, insights (list),
+                      open_questions (list), action_items (list).
+                      Each insight must have: text, confidence_tier, tags,
+                      connections.
+
+    Returns a confirmation listing every AIEX ID assigned.
+    """
+    try:
+        data = json.loads(session_json)
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}\n\nMake sure to pass a valid JSON string."
+
+    insights_raw = data.get("insights", [])
+    if not insights_raw:
+        return "No insights found in session_json. Provide at least one insight with a 'text' field."
+
+    date            = data.get("date", datetime.now(timezone.utc).date().isoformat())
+    source_platform = data.get("source_platform", "")
+    session_focus   = data.get("session_focus", "")
+    open_questions  = data.get("open_questions", [])
+    action_items    = data.get("action_items", [])
+
+    valid_tiers = {"Seed", "Developing", "Strong"}
+
+    stored: list[dict] = []
+
+    with _db() as con:
+        for insight_data in insights_raw:
+            text = (insight_data.get("text") or "").strip()
+            if not text:
+                continue
+
+            confidence_tier = insight_data.get("confidence_tier", "Seed")
+            if confidence_tier not in valid_tiers:
+                confidence_tier = "Seed"
+
+            connections_text = insight_data.get("connections", [])
+            tag_strings      = insight_data.get("tags", [])
+
+            content = {
+                "insight":          text,
+                "confidence_tier":  confidence_tier,
+                "session_focus":    session_focus,
+                "source_platform":  source_platform,
+                "date":             date,
+                "connections":      connections_text,
+                "open_questions":   open_questions,
+                "action_items":     action_items,
+            }
+
+            # Parse tags from list format: ["#topic", "@source", "bare-word"]
+            tags: list[dict] = []
+            seen: set[tuple[str, str]] = set()
+
+            for tag_str in tag_strings:
+                tag_str = tag_str.strip()
+                if len(tag_str) < 2:
+                    continue
+                if tag_str[0] in ('#', '@', '!', '?', '$', '*'):
+                    prefix = tag_str[0]
+                    value  = tag_str[1:].lower()
+                else:
+                    prefix = '#'
+                    value  = tag_str.lower()
+                key = (prefix, value)
+                if key not in seen:
+                    seen.add(key)
+                    tags.append({"prefix": prefix, "value": value})
+
+            # Also extract inline schema tags from the insight text itself
+            from .templates import extract_schema_tags
+            for t in extract_schema_tags(text):
+                key = (t["prefix"], t["value"])
+                if key not in seen:
+                    seen.add(key)
+                    tags.append(t)
+
+            aiex_id    = get_next_aiex_id(con)
+            capture_id = insert_capture(
+                con,
+                type_="AIEX",
+                template_id=aiex_id,
+                content=content,
+                raw_ocr=text,
+                summary=text[:200],
+                confidence=1.0,
+                image_path="",
+            )
+            insert_tags(con, capture_id, tags)
+            con.commit()
+
+            connections = build_connections(con, capture_id)
+
+            stored.append({
+                "aiex_id":     aiex_id,
+                "capture_id":  capture_id,
+                "text":        text,
+                "tier":        confidence_tier,
+                "tags":        tags,
+                "connections": connections,
+            })
+
+    if not stored:
+        return "No insights were committed. Ensure each insight has a non-empty 'text' field."
+
+    _tier_emoji = {"Seed": "🟢", "Developing": "🔴", "Strong": "🟡"}
+
+    lines = [f"AIEX Commit — {len(stored)} insight(s) stored\n{'─' * 40}"]
+    for s in stored:
+        tag_str  = " ".join(f"{t['prefix']}{t['value']}" for t in s["tags"][:5])
+        conn_str = f"\n    ★ {len(s['connections'])} connection(s) detected" if s["connections"] else ""
+        emoji    = _tier_emoji.get(s["tier"], "")
+        preview  = s["text"][:80] + ("…" if len(s["text"]) > 80 else "")
+        lines.append(
+            f"\n  {s['aiex_id']} (#{s['capture_id']})  {emoji} {s['tier']}\n"
+            f"    {preview}\n"
+            f"    Tags: {tag_str or 'none'}{conn_str}"
+        )
+
+    if open_questions:
+        lines.append(f"\n\nOpen questions ({len(open_questions)}):")
+        for q in open_questions:
+            lines.append(f"  ? {q}")
+
+    if action_items:
+        lines.append(f"\nAction items ({len(action_items)}):")
+        for item in action_items:
+            if isinstance(item, dict):
+                p = "!" if item.get("priority") == "!" else " "
+                lines.append(f"  {p} {item.get('text', str(item))}")
+            else:
+                lines.append(f"    {item}")
+
+    lines.append(f"\nAll entries stored as type=AIEX (AI-Extracted flag).")
     return "\n".join(lines)
 
 

@@ -37,7 +37,7 @@ def init_db(db_path: Path | None = None) -> None:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS captures (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC')),
+                type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX')),
                 template_id TEXT NOT NULL,          -- e.g. RC-001
                 content_json TEXT NOT NULL,          -- parsed fields as JSON
                 raw_ocr     TEXT NOT NULL,
@@ -662,6 +662,95 @@ def search_fts(
         ]
         results.append(r)
     return results
+
+
+def migrate_add_aiex(db_path: Path | None = None) -> None:
+    """
+    One-time migration: add 'AIEX' to the captures type CHECK constraint.
+
+    Safe to call on every startup — exits immediately if already migrated
+    or if the captures table doesn't exist yet (init_db hasn't run).
+    """
+    with get_connection(db_path) as con:
+        row = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='captures'"
+        ).fetchone()
+        if not row or "AIEX" in row["sql"]:
+            return  # Already migrated or table doesn't exist yet
+
+        # SQLite doesn't support ALTER COLUMN — requires table recreation.
+        con.executescript("""
+            PRAGMA foreign_keys=OFF;
+
+            BEGIN;
+
+            ALTER TABLE captures RENAME TO _captures_backup;
+
+            DROP TRIGGER IF EXISTS captures_fts_insert;
+            DROP TRIGGER IF EXISTS captures_fts_delete;
+            DROP TRIGGER IF EXISTS captures_fts_update;
+            DROP TABLE IF EXISTS captures_fts;
+
+            CREATE TABLE captures (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                type         TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX')),
+                template_id  TEXT NOT NULL,
+                content_json TEXT NOT NULL,
+                raw_ocr      TEXT NOT NULL,
+                summary      TEXT NOT NULL DEFAULT '',
+                confidence   REAL NOT NULL DEFAULT 0.0,
+                image_path   TEXT NOT NULL DEFAULT '',
+                created_at   TEXT NOT NULL
+            );
+
+            INSERT INTO captures SELECT * FROM _captures_backup;
+            DROP TABLE _captures_backup;
+
+            CREATE VIRTUAL TABLE captures_fts
+            USING fts5(
+                raw_ocr,
+                summary,
+                content='captures',
+                content_rowid='id'
+            );
+
+            INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                SELECT id, raw_ocr, summary FROM captures;
+
+            CREATE TRIGGER captures_fts_insert
+            AFTER INSERT ON captures BEGIN
+                INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                VALUES (new.id, new.raw_ocr, new.summary);
+            END;
+
+            CREATE TRIGGER captures_fts_delete
+            AFTER DELETE ON captures BEGIN
+                INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                VALUES ('delete', old.id, old.raw_ocr, old.summary);
+            END;
+
+            CREATE TRIGGER captures_fts_update
+            AFTER UPDATE ON captures BEGIN
+                INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                VALUES ('delete', old.id, old.raw_ocr, old.summary);
+                INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                VALUES (new.id, new.raw_ocr, new.summary);
+            END;
+
+            COMMIT;
+
+            PRAGMA foreign_keys=ON;
+        """)
+
+
+def get_next_aiex_id(con: sqlite3.Connection) -> str:
+    """Return the next sequential AIEX-NNN template ID."""
+    row = con.execute(
+        """SELECT MAX(CAST(SUBSTR(template_id, 6) AS INTEGER)) AS max_num
+           FROM captures WHERE type='AIEX'"""
+    ).fetchone()
+    next_num = (row["max_num"] or 0) + 1
+    return f"AIEX-{next_num:03d}"
 
 
 def get_stats(con: sqlite3.Connection) -> dict:
