@@ -12,7 +12,9 @@ Turn your handwritten journal photos into a searchable, AI-powered knowledge bas
 
 ## What it does
 
-The KSJ MCP server connects your physical journal to an AI assistant via the **Model Context Protocol (MCP)** — an open standard for linking AI models to local tools and data.
+The KSJ MCP server connects your knowledge — handwritten or digital — to an AI assistant via the **Model Context Protocol (MCP)** — an open standard for linking AI models to local tools and data.
+
+### Physical journal → knowledge base
 
 Photograph a journal page, upload it, and your AI assistant can:
 
@@ -21,7 +23,18 @@ Photograph a journal page, upload it, and your AI assistant can:
 - Surface your open questions, key insights, and breakthroughs
 - Export your knowledge base as Markdown or JSON
 
-**All processing is local.** No cloud. No subscription. Your notes stay on your machine.
+### AI research sessions → structured insights
+
+Spend an hour going deep on a topic with an AI assistant and most of that thinking vanishes when the chat ends. `extract_ai_insights` fixes that — paste or pipe a session transcript and the server extracts what matters:
+
+- Novel hypotheses and seed ideas
+- Unexpected connections between concepts
+- Open questions worth pursuing
+- Decisions made and action items
+
+Each insight is confidence-scored (🟢 Seed / 🔴 Developing / 🟡 Strong) and shown to you for review before anything is written to the database. Approved entries are stored alongside your journal captures with full tag support, so AI-extracted insights surface in searches, connection graphs, and synthesis suggestions alongside your handwritten notes.
+
+**All processing is local.** Your notes stay on your machine.
 
 ---
 
@@ -155,6 +168,8 @@ Once connected, talk to your AI assistant naturally.
 
 ## Available tools
 
+### Journal tools
+
 | Tool | What it does |
 |------|-------------|
 | `upload_capture` | OCR a journal photo, parse the template, store it, highlight strongest connection |
@@ -170,6 +185,12 @@ Once connected, talk to your AI assistant naturally.
 | `get_breakthroughs` | All SYN entries chronologically — your complete breakthrough timeline |
 | `dream_patterns` | Recurring symbols, emotions, motifs, and themes across DC pages |
 | `knowledge_progress` | Track Needs Work → Solid → Mastered progression from REV entries |
+
+### AI session tools
+
+| Tool | What it does |
+|------|-------------|
+| `extract_ai_insights` | Extract confidence-scored insights from an AI research session transcript — with user review before any DB write |
 
 ---
 
