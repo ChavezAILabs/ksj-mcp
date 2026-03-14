@@ -735,6 +735,39 @@ def migrate_add_aiex(db_path: Path | None = None) -> None:
             con.execute("INSERT INTO captures SELECT * FROM _captures_backup")
             con.execute("DROP TABLE _captures_backup")
 
+            # Rebuild tags + connections so their FKs point to captures again.
+            # SQLite auto-updated their REFERENCES when we renamed captures →
+            # _captures_backup; now that _captures_backup is gone we must fix them.
+            con.execute("""
+                CREATE TABLE _tags_tmp (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    capture_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    prefix     TEXT NOT NULL,
+                    value      TEXT NOT NULL
+                )
+            """)
+            con.execute("INSERT INTO _tags_tmp SELECT * FROM tags")
+            con.execute("DROP TABLE tags")
+            con.execute("ALTER TABLE _tags_tmp RENAME TO tags")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_tags_capture ON tags(capture_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_tags_value   ON tags(prefix, value)")
+
+            con.execute("""
+                CREATE TABLE _connections_tmp (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    target_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    type      TEXT NOT NULL,
+                    strength  REAL NOT NULL DEFAULT 1.0,
+                    method    TEXT NOT NULL
+                )
+            """)
+            con.execute("INSERT INTO _connections_tmp SELECT * FROM connections")
+            con.execute("DROP TABLE connections")
+            con.execute("ALTER TABLE _connections_tmp RENAME TO connections")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_conn_source ON connections(source_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_conn_target ON connections(target_id)")
+
             # Rebuild FTS virtual table and triggers.
             con.execute("""
                 CREATE VIRTUAL TABLE captures_fts USING fts5(
@@ -766,6 +799,79 @@ def migrate_add_aiex(db_path: Path | None = None) -> None:
                     VALUES (new.id, new.raw_ocr, new.summary);
                 END
             """)
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.close()
+
+
+def migrate_fix_fk_references(db_path: Path | None = None) -> None:
+    """
+    Repair tags/connections tables whose FK references still point to
+    _captures_backup after a partial AIEX migration.
+
+    This can happen if migrate_add_aiex ran (renamed captures → backup, created
+    new captures, dropped backup) but did not rebuild tags/connections.  With
+    foreign_keys=ON, any write to tags or connections will then fail with
+    'no such table: main._captures_backup'.
+
+    Safe to call on every startup — exits immediately when not needed.
+    """
+    path = db_path or _DEFAULT_DB
+    if not path.exists():
+        return
+
+    con = sqlite3.connect(str(path), isolation_level=None)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA foreign_keys=OFF")
+
+    try:
+        tags_row = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tags'"
+        ).fetchone()
+
+        # Nothing to fix if tags doesn't exist or already references captures.
+        if not tags_row or "_captures_backup" not in (tags_row["sql"] or ""):
+            return
+
+        con.execute("BEGIN")
+        try:
+            # Rebuild tags
+            con.execute("""
+                CREATE TABLE _tags_tmp (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    capture_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    prefix     TEXT NOT NULL,
+                    value      TEXT NOT NULL
+                )
+            """)
+            con.execute("INSERT INTO _tags_tmp SELECT * FROM tags")
+            con.execute("DROP TABLE tags")
+            con.execute("ALTER TABLE _tags_tmp RENAME TO tags")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_tags_capture ON tags(capture_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_tags_value   ON tags(prefix, value)")
+
+            # Rebuild connections
+            con.execute("""
+                CREATE TABLE _connections_tmp (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    target_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    type      TEXT NOT NULL,
+                    strength  REAL NOT NULL DEFAULT 1.0,
+                    method    TEXT NOT NULL
+                )
+            """)
+            con.execute("INSERT INTO _connections_tmp SELECT * FROM connections")
+            con.execute("DROP TABLE connections")
+            con.execute("ALTER TABLE _connections_tmp RENAME TO connections")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_conn_source ON connections(source_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_conn_target ON connections(target_id)")
+
             con.execute("COMMIT")
         except Exception:
             con.execute("ROLLBACK")

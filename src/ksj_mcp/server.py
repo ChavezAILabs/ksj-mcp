@@ -46,6 +46,7 @@ from .database import (
     insert_tags,
     list_captures,
     migrate_add_aiex,
+    migrate_fix_fk_references,
     search_fts,
     get_connection,
 )
@@ -131,6 +132,7 @@ _IMAGES_DIR  = _data_dir() / "images"
 
 init_db(_DB_PATH)
 migrate_add_aiex(_DB_PATH)
+migrate_fix_fk_references(_DB_PATH)
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
