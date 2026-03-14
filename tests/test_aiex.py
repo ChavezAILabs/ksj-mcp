@@ -47,6 +47,32 @@ class TestMigrateAddAiex:
         migrate_add_aiex(db_path)
         migrate_add_aiex(db_path)  # second call — should not raise
 
+    def test_partial_migration_recovery(self, tmp_path):
+        """If a previous migration left _captures_backup behind, it is cleaned up."""
+        db_path = tmp_path / "partial.db"
+        init_db(db_path)
+
+        # Simulate a partial migration: new captures (AIEX-aware) exists AND
+        # _captures_backup was never dropped.
+        with get_connection(db_path) as con:
+            con.execute(
+                """CREATE TABLE _captures_backup (
+                    id INTEGER PRIMARY KEY, type TEXT, template_id TEXT,
+                    content_json TEXT, raw_ocr TEXT, summary TEXT DEFAULT '',
+                    confidence REAL DEFAULT 0.0, image_path TEXT DEFAULT '',
+                    created_at TEXT
+                )"""
+            )
+            con.commit()
+
+        migrate_add_aiex(db_path)  # should clean up backup without error
+
+        with get_connection(db_path) as con:
+            backup = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_captures_backup'"
+            ).fetchone()
+            assert backup is None  # backup was dropped
+
     def test_old_schema_migrated(self, tmp_path):
         """A DB with the old CHECK constraint is migrated to include AIEX."""
         db_path = tmp_path / "old.db"

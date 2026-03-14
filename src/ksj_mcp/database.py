@@ -668,79 +668,111 @@ def migrate_add_aiex(db_path: Path | None = None) -> None:
     """
     One-time migration: add 'AIEX' to the captures type CHECK constraint.
 
-    Safe to call on every startup — exits immediately if already migrated
-    or if the captures table doesn't exist yet (init_db hasn't run).
+    Safe to call on every startup — handles partial migration state (leftover
+    _captures_backup table) and exits immediately when already complete.
+
+    Uses isolation_level=None (autocommit mode) with explicit BEGIN/COMMIT
+    to avoid conflicts with Python's sqlite3 implicit transaction management.
     """
-    with get_connection(db_path) as con:
-        row = con.execute(
+    path = db_path or _DEFAULT_DB
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Open a dedicated connection in autocommit mode for reliable DDL control.
+    con = sqlite3.connect(str(path), isolation_level=None)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA foreign_keys=OFF")
+
+    try:
+        captures_row = con.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='captures'"
         ).fetchone()
-        if not row or "AIEX" in row["sql"]:
-            return  # Already migrated or table doesn't exist yet
+        backup_exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_captures_backup'"
+        ).fetchone() is not None
 
-        # SQLite doesn't support ALTER COLUMN — requires table recreation.
-        con.executescript("""
-            PRAGMA foreign_keys=OFF;
+        # Already migrated with no leftover backup — nothing to do.
+        if captures_row and "AIEX" in captures_row["sql"] and not backup_exists:
+            return
 
-            BEGIN;
+        # Partial migration: new captures exists with AIEX but backup wasn't dropped.
+        if backup_exists and captures_row and "AIEX" in captures_row["sql"]:
+            con.execute("DROP TABLE _captures_backup")
+            return
 
-            ALTER TABLE captures RENAME TO _captures_backup;
+        # No captures table yet — init_db will create it with AIEX support.
+        if not captures_row and not backup_exists:
+            return
 
-            DROP TRIGGER IF EXISTS captures_fts_insert;
-            DROP TRIGGER IF EXISTS captures_fts_delete;
-            DROP TRIGGER IF EXISTS captures_fts_update;
-            DROP TABLE IF EXISTS captures_fts;
+        # Full migration needed (old schema without AIEX, or backup-only state).
+        con.execute("BEGIN")
+        try:
+            # If captures still exists with old schema, rename it to backup.
+            if captures_row and "AIEX" not in captures_row["sql"]:
+                con.execute("ALTER TABLE captures RENAME TO _captures_backup")
 
-            CREATE TABLE captures (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                type         TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX')),
-                template_id  TEXT NOT NULL,
-                content_json TEXT NOT NULL,
-                raw_ocr      TEXT NOT NULL,
-                summary      TEXT NOT NULL DEFAULT '',
-                confidence   REAL NOT NULL DEFAULT 0.0,
-                image_path   TEXT NOT NULL DEFAULT '',
-                created_at   TEXT NOT NULL
-            );
+            # Drop stale FTS triggers and table (IF EXISTS is safe).
+            for trigger in ("captures_fts_insert", "captures_fts_delete", "captures_fts_update"):
+                con.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            con.execute("DROP TABLE IF EXISTS captures_fts")
 
-            INSERT INTO captures SELECT * FROM _captures_backup;
-            DROP TABLE _captures_backup;
+            # Create new captures table with AIEX support.
+            con.execute("""
+                CREATE TABLE captures (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type         TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX')),
+                    template_id  TEXT NOT NULL,
+                    content_json TEXT NOT NULL,
+                    raw_ocr      TEXT NOT NULL,
+                    summary      TEXT NOT NULL DEFAULT '',
+                    confidence   REAL NOT NULL DEFAULT 0.0,
+                    image_path   TEXT NOT NULL DEFAULT '',
+                    created_at   TEXT NOT NULL
+                )
+            """)
 
-            CREATE VIRTUAL TABLE captures_fts
-            USING fts5(
-                raw_ocr,
-                summary,
-                content='captures',
-                content_rowid='id'
-            );
+            # Copy existing data and drop backup.
+            con.execute("INSERT INTO captures SELECT * FROM _captures_backup")
+            con.execute("DROP TABLE _captures_backup")
 
-            INSERT INTO captures_fts(rowid, raw_ocr, summary)
-                SELECT id, raw_ocr, summary FROM captures;
-
-            CREATE TRIGGER captures_fts_insert
-            AFTER INSERT ON captures BEGIN
+            # Rebuild FTS virtual table and triggers.
+            con.execute("""
+                CREATE VIRTUAL TABLE captures_fts USING fts5(
+                    raw_ocr, summary,
+                    content='captures', content_rowid='id'
+                )
+            """)
+            con.execute("""
                 INSERT INTO captures_fts(rowid, raw_ocr, summary)
-                VALUES (new.id, new.raw_ocr, new.summary);
-            END;
-
-            CREATE TRIGGER captures_fts_delete
-            AFTER DELETE ON captures BEGIN
-                INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
-                VALUES ('delete', old.id, old.raw_ocr, old.summary);
-            END;
-
-            CREATE TRIGGER captures_fts_update
-            AFTER UPDATE ON captures BEGIN
-                INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
-                VALUES ('delete', old.id, old.raw_ocr, old.summary);
-                INSERT INTO captures_fts(rowid, raw_ocr, summary)
-                VALUES (new.id, new.raw_ocr, new.summary);
-            END;
-
-            COMMIT;
-
-            PRAGMA foreign_keys=ON;
-        """)
+                SELECT id, raw_ocr, summary FROM captures
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_insert AFTER INSERT ON captures BEGIN
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, new.raw_ocr, new.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_delete AFTER DELETE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, old.raw_ocr, old.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_update AFTER UPDATE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, old.raw_ocr, old.summary);
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, new.raw_ocr, new.summary);
+                END
+            """)
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.close()
 
 
 def get_next_aiex_id(con: sqlite3.Connection) -> str:
