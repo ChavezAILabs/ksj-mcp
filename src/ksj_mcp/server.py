@@ -92,7 +92,7 @@ from .ocr import (
     extract_text,
     parse_template_id,
 )
-from .templates import parse_template
+from .templates import assign_role, extract_schema_tags, normalize_tag_value, parse_template
 
 # ── Server init ───────────────────────────────────────────────────────────────
 
@@ -2400,7 +2400,10 @@ def commit_aiex(session_json: str) -> str:
                 "action_items":     action_items,
             }
 
-            # Parse tags from list format: ["#topic", "@source", "bare-word"]
+            # Parse tags from list format: ["#topic", "@source", "bare-word"].
+            # Normalized + role-assigned the same way extract_schema_tags does
+            # (§1.6/§1.10), so AIEX tags show up in the Index view and role
+            # filters exactly like journal-capture tags do.
             tags: list[dict] = []
             seen: set[tuple[str, str]] = set()
 
@@ -2409,19 +2412,24 @@ def commit_aiex(session_json: str) -> str:
                 if len(tag_str) < 2:
                     continue
                 if tag_str[0] in ('#', '@', '!', '?', '$', '*'):
-                    prefix = tag_str[0]
-                    value  = tag_str[1:].lower()
+                    prefix, raw_value = tag_str[0], tag_str[1:]
                 else:
-                    prefix = '#'
-                    value  = tag_str.lower()
+                    prefix, raw_value = '#', tag_str
+                value = normalize_tag_value(raw_value)
+                if not value:
+                    continue
                 key = (prefix, value)
                 if key not in seen:
                     seen.add(key)
-                    tags.append({"prefix": prefix, "value": value})
+                    tags.append({
+                        "prefix":  prefix,
+                        "value":   value,
+                        "display": raw_value,
+                        "role":    assign_role(prefix, value, "AIEX"),
+                    })
 
             # Also extract inline schema tags from the insight text itself
-            from .templates import extract_schema_tags
-            for t in extract_schema_tags(text):
+            for t in extract_schema_tags(text, "AIEX"):
                 key = (t["prefix"], t["value"])
                 if key not in seen:
                     seen.add(key)

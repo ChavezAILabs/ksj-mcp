@@ -16,6 +16,7 @@ import pytest
 
 from ksj_mcp.database import (
     get_connection,
+    get_captures_for_entity,
     get_next_aiex_id,
     get_stats,
     init_db,
@@ -400,6 +401,96 @@ class TestCommitAiex:
             ).fetchall()
         tag_set = {(t["prefix"], t["value"]) for t in tags}
         assert ("#", "bare-word") in tag_set
+
+    def test_list_tags_get_role_and_display(self, tmp_path):
+        """
+        Tags from the JSON tags list get the same role/display treatment as
+        tags parsed from journal captures — previously these were bare
+        {prefix, value} dicts with no role, so AIEX tags were invisible to
+        role-aware tools (e.g. the HTML view's Index page).
+        """
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        import ksj_mcp.server as srv
+        srv._DB_PATH = db_path
+
+        srv.commit_aiex(self._session_json())
+
+        with get_connection(db_path) as con:
+            rows = con.execute(
+                "SELECT prefix, value, display, role FROM tags WHERE capture_id=1"
+            ).fetchall()
+        by_value = {r["value"]: r for r in rows}
+        assert by_value["sedenion"]["role"] == "topic"
+        assert by_value["sedenion"]["display"] == "sedenion"
+        # original casing preserved in display, normalized in value
+        assert by_value["riemannhypothesis"]["display"] == "RiemannHypothesis"
+
+    def test_dollar_tag_in_list_gets_insight_role(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        import ksj_mcp.server as srv
+        srv._DB_PATH = db_path
+
+        srv.commit_aiex(self._session_json())
+
+        with get_connection(db_path) as con:
+            row = con.execute(
+                "SELECT role FROM tags WHERE capture_id=2 AND prefix='$'"
+            ).fetchone()
+        assert row["role"] == "insight"
+
+    def test_bare_word_tag_gets_topic_role(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        import ksj_mcp.server as srv
+        srv._DB_PATH = db_path
+
+        data = json.loads(self._session_json())
+        data["insights"][0]["tags"] = ["bare-word"]
+        srv.commit_aiex(json.dumps(data))
+
+        with get_connection(db_path) as con:
+            row = con.execute(
+                "SELECT role FROM tags WHERE capture_id=1 AND value='bare-word'"
+            ).fetchone()
+        assert row["role"] == "topic"
+
+    def test_at_tag_in_list_becomes_entity(self, tmp_path):
+        """A non-template-ID @ value in the tags list now creates an entity,
+        matching the behavior of @ tags found inline in the insight text."""
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        import ksj_mcp.server as srv
+        srv._DB_PATH = db_path
+
+        data = json.loads(self._session_json())
+        data["insights"][0]["tags"] = ["@Alain-Connes"]
+        srv.commit_aiex(json.dumps(data))
+
+        with get_connection(db_path) as con:
+            row = con.execute(
+                "SELECT role FROM tags WHERE capture_id=1 AND prefix='@'"
+            ).fetchone()
+            assert row["role"] == "entity"
+            appearances = get_captures_for_entity(con, "Alain-Connes")
+        assert len(appearances) == 1
+
+    def test_at_template_id_tag_in_list_stays_reference(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        import ksj_mcp.server as srv
+        srv._DB_PATH = db_path
+
+        data = json.loads(self._session_json())
+        data["insights"][0]["tags"] = ["@RC-001"]
+        srv.commit_aiex(json.dumps(data))
+
+        with get_connection(db_path) as con:
+            row = con.execute(
+                "SELECT role FROM tags WHERE capture_id=1 AND prefix='@'"
+            ).fetchone()
+        assert row["role"] == "reference"
 
     def test_action_items_in_output(self, tmp_path):
         db_path = tmp_path / "test.db"
