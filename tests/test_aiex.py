@@ -259,6 +259,26 @@ class TestCommitAiex:
         assert rows[0]["template_id"] == "AIEX-001"
         assert rows[1]["template_id"] == "AIEX-002"
 
+    def test_source_is_ai_extract(self, tmp_path):
+        """
+        Regression: commit_aiex's insert_capture call previously omitted
+        source=, so new AIEX rows defaulted to 'journal' — silently
+        inflating journal_health's KPIs (which filter WHERE source=
+        'journal') and missing the AI-extracted badge in export_html.
+        Only the one-time migration backfill set existing rows correctly;
+        newly committed ones need this set explicitly at insert time.
+        """
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        import ksj_mcp.server as srv
+        srv._DB_PATH = db_path
+
+        srv.commit_aiex(self._session_json())
+
+        with get_connection(db_path) as con:
+            rows = con.execute("SELECT source FROM captures WHERE type='AIEX'").fetchall()
+        assert all(r["source"] == "ai_extract" for r in rows)
+
     def test_tags_stored(self, tmp_path):
         db_path = tmp_path / "test.db"
         init_db(db_path)

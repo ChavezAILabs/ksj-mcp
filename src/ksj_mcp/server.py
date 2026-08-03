@@ -2921,6 +2921,7 @@ def commit_aiex(session_json: str) -> str:
                 summary=text[:200],
                 confidence=1.0,
                 image_path="",
+                source="ai_extract",
             )
             insert_tags(con, capture_id, tags)
             con.commit()
