@@ -9,6 +9,7 @@ Tables:
 
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,22 +38,27 @@ def init_db(db_path: Path | None = None) -> None:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS captures (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX')),
-                template_id TEXT NOT NULL,          -- e.g. RC-001
+                type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX','UNKNOWN')),
+                template_id TEXT,                    -- e.g. RC-001; NULL = unidentified page
+                page_suffix TEXT,                    -- stray trailing letter (tolerated, not interpreted)
+                volume      INTEGER NOT NULL DEFAULT 1,
                 content_json TEXT NOT NULL,          -- parsed fields as JSON
                 raw_ocr     TEXT NOT NULL,
                 corrected_ocr TEXT,                  -- user-corrected transcription (raw_ocr preserved)
                 summary     TEXT NOT NULL DEFAULT '',
                 confidence  REAL NOT NULL DEFAULT 0.0,
                 image_path  TEXT NOT NULL DEFAULT '',
+                source      TEXT NOT NULL DEFAULT 'journal',  -- 'journal' | 'ai_extract'
                 created_at  TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS tags (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 capture_id  INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
-                prefix      TEXT NOT NULL,           -- # @ ! ? $ or ->
-                value       TEXT NOT NULL
+                prefix      TEXT NOT NULL,           -- # @ ! ? $ * or -> (as written)
+                value       TEXT NOT NULL,           -- normalized (casefold, whitespace collapsed)
+                display     TEXT,                    -- original string as written
+                role        TEXT                     -- canonical semantic role from (prefix, template type)
             );
 
             CREATE TABLE IF NOT EXISTS connections (
@@ -64,10 +70,41 @@ def init_db(db_path: Path | None = None) -> None:
                 method      TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS entities (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,           -- display form, as written
+                normalized  TEXT NOT NULL,           -- casefold + whitespace collapse
+                kind        TEXT NOT NULL DEFAULT 'other',  -- person|place|work|org|symbol|other
+                UNIQUE(normalized, kind)
+            );
+
+            CREATE TABLE IF NOT EXISTS capture_entities (
+                capture_id  INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                entity_id   INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                source      TEXT NOT NULL DEFAULT 'extracted',  -- 'extracted' | 'asserted'
+                PRIMARY KEY (capture_id, entity_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('active_volumes', '*');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('current_volume', '1');
+
             CREATE INDEX IF NOT EXISTS idx_tags_capture ON tags(capture_id);
             CREATE INDEX IF NOT EXISTS idx_tags_value   ON tags(prefix, value);
             CREATE INDEX IF NOT EXISTS idx_conn_source  ON connections(source_id);
             CREATE INDEX IF NOT EXISTS idx_conn_target  ON connections(target_id);
+            -- One page per (volume, template ID, suffix); unidentified pages
+            -- (NULL template_id) are exempt — NULLs are distinct in SQLite.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_vol_tid
+                ON captures(volume, template_id, COALESCE(page_suffix, ''));
+            -- Dedup key for edges: one row per (source, target, type) so a
+            -- reference edge can coexist with a tag_overlap edge on the same
+            -- pair, and re-inserts update strength instead of doubling.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conn_unique
+                ON connections(source_id, target_id, type);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts
             USING fts5(
@@ -108,28 +145,148 @@ def init_db(db_path: Path | None = None) -> None:
 def insert_capture(
     con: sqlite3.Connection,
     type_: str,
-    template_id: str,
+    template_id: str | None,
     content: dict[str, Any],
     raw_ocr: str,
     summary: str,
     confidence: float,
     image_path: str = "",
+    volume: int = 1,
+    source: str = "journal",
+    page_suffix: str | None = None,
 ) -> int:
     now = datetime.now(timezone.utc).isoformat()
     cur = con.execute(
         """INSERT INTO captures
-               (type, template_id, content_json, raw_ocr, summary, confidence, image_path, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (type_, template_id, json.dumps(content), raw_ocr, summary, confidence, image_path, now),
+               (type, template_id, page_suffix, volume, content_json, raw_ocr,
+                summary, confidence, image_path, source, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (type_, template_id or None, page_suffix, volume, json.dumps(content),
+         raw_ocr, summary, confidence, image_path, source, now),
     )
     return cur.lastrowid
 
 
 def insert_tags(con: sqlite3.Connection, capture_id: int, tags: list[dict]) -> None:
     con.executemany(
-        "INSERT INTO tags (capture_id, prefix, value) VALUES (?, ?, ?)",
-        [(capture_id, t["prefix"], t["value"]) for t in tags],
+        "INSERT INTO tags (capture_id, prefix, value, display, role) VALUES (?, ?, ?, ?, ?)",
+        [
+            (capture_id, t["prefix"], t["value"],
+             t.get("display", t["value"]), t.get("role"))
+            for t in tags
+        ],
     )
+    # Entity-role tags populate the entities table (§1.9/§1.10 unification:
+    # a dream symbol and a screenplay character are the same kind of object).
+    for t in tags:
+        if t.get("role") == "entity":
+            link_capture_entity(
+                con, capture_id,
+                name=t.get("display", t["value"]),
+                kind="other",
+                source="extracted",
+            )
+
+
+# ── Settings ───────────────────────────────────────────────────────────────────
+
+def get_setting(con: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
+    con.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+    con.commit()
+
+
+def get_current_volume(con: sqlite3.Connection) -> int:
+    try:
+        return int(get_setting(con, "current_volume", "1"))
+    except (TypeError, ValueError):
+        return 1
+
+
+def get_active_volumes(con: sqlite3.Connection) -> list[int] | None:
+    """Volumes enabled for reading. None means all ('*')."""
+    raw = get_setting(con, "active_volumes", "*")
+    if raw is None or raw.strip() == "*":
+        return None
+    try:
+        vols = sorted({int(v) for v in raw.split(",") if v.strip()})
+        return vols or None
+    except ValueError:
+        return None
+
+
+def _volume_where(volumes: list[int] | None, alias: str = "c") -> tuple[str, list]:
+    """SQL fragment (starting with AND) restricting *alias* to *volumes*."""
+    if not volumes:
+        return "", []
+    placeholders = ",".join("?" * len(volumes))
+    return f" AND {alias}.volume IN ({placeholders})", list(volumes)
+
+
+# ── Entities ───────────────────────────────────────────────────────────────────
+
+def upsert_entity(con: sqlite3.Connection, name: str, kind: str = "other") -> int:
+    """Insert or fetch an entity by (normalized name, kind). Returns entity id."""
+    normalized = " ".join(name.casefold().split())
+    row = con.execute(
+        "SELECT id FROM entities WHERE normalized=? AND kind=?", (normalized, kind)
+    ).fetchone()
+    if row:
+        return row["id"]
+    cur = con.execute(
+        "INSERT INTO entities (name, normalized, kind) VALUES (?, ?, ?)",
+        (name.strip(), normalized, kind),
+    )
+    return cur.lastrowid
+
+
+def link_capture_entity(
+    con: sqlite3.Connection,
+    capture_id: int,
+    name: str,
+    kind: str = "other",
+    source: str = "extracted",
+) -> int:
+    """Link *capture_id* to the entity *name*, creating the entity if needed."""
+    entity_id = upsert_entity(con, name, kind)
+    con.execute(
+        "INSERT OR IGNORE INTO capture_entities (capture_id, entity_id, source) VALUES (?, ?, ?)",
+        (capture_id, entity_id, source),
+    )
+    return entity_id
+
+
+def get_entities_for_capture(con: sqlite3.Connection, capture_id: int) -> list[dict]:
+    rows = con.execute(
+        """SELECT e.id, e.name, e.kind, ce.source
+           FROM capture_entities ce JOIN entities e ON e.id = ce.entity_id
+           WHERE ce.capture_id=? ORDER BY e.name""",
+        (capture_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_captures_for_entity(con: sqlite3.Connection, name: str) -> list[dict]:
+    normalized = " ".join(name.casefold().split())
+    rows = con.execute(
+        """SELECT c.id, c.type, c.template_id, c.volume, c.summary, c.created_at,
+                  e.name AS entity_name, e.kind
+           FROM entities e
+           JOIN capture_entities ce ON ce.entity_id = e.id
+           JOIN captures c ON c.id = ce.capture_id
+           WHERE e.normalized = ?
+           ORDER BY c.created_at DESC""",
+        (normalized,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def update_capture_correction(
@@ -184,20 +341,31 @@ def insert_connection(
     strength: float,
     method: str,
 ) -> int:
-    # Avoid duplicate connections in either direction
-    existing = con.execute(
-        """SELECT id FROM connections
-           WHERE (source_id=? AND target_id=?) OR (source_id=? AND target_id=?)""",
-        (source_id, target_id, target_id, source_id),
-    ).fetchone()
-    if existing:
-        return existing["id"]
+    """
+    Upsert an edge keyed on (source_id, target_id, type).
+
+    Tag overlap is symmetric, so those edges are stored in canonical
+    (low id → high id) direction — one row per pair. References are
+    directional and keep their true direction. Keying on type means a
+    reference edge and a tag_overlap edge can coexist on the same pair
+    (the old either-direction check silently swallowed references), and
+    re-inserting updates strength instead of duplicating.
+    """
+    if type_ == "tag_overlap" and source_id > target_id:
+        source_id, target_id = target_id, source_id
     cur = con.execute(
         """INSERT INTO connections (source_id, target_id, type, strength, method)
-           VALUES (?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(source_id, target_id, type) DO UPDATE SET
+               strength = excluded.strength,
+               method   = excluded.method""",
         (source_id, target_id, type_, strength, method),
     )
-    return cur.lastrowid
+    row = con.execute(
+        "SELECT id FROM connections WHERE source_id=? AND target_id=? AND type=?",
+        (source_id, target_id, type_),
+    ).fetchone()
+    return row["id"] if row else cur.lastrowid
 
 
 def get_capture(con: sqlite3.Connection, capture_id: int) -> dict | None:
@@ -241,19 +409,37 @@ def list_captures(
     return [dict(r) for r in rows]
 
 
-def get_connections(con: sqlite3.Connection, capture_id: int) -> list[dict]:
+def get_connections(
+    con: sqlite3.Connection,
+    capture_id: int,
+    volumes: list[int] | None = None,
+) -> list[dict]:
+    """
+    All edges touching *capture_id*, references ranked above tag overlap.
+
+    Each row carries a "direction" label: references are directional
+    ('cites' = this capture references the other, 'cited_by' = the other
+    references this one); tag overlap is symmetric ('shared').
+    """
+    vol_sql, vol_params = _volume_where(volumes, alias="cap")
     rows = con.execute(
-        """SELECT c.id, c.source_id, c.target_id, c.type, c.strength, c.method,
+        f"""SELECT c.id, c.source_id, c.target_id, c.type, c.strength, c.method,
                   cap.template_id AS connected_template,
-                  cap.summary     AS connected_summary
+                  cap.volume      AS connected_volume,
+                  cap.summary     AS connected_summary,
+                  CASE
+                      WHEN c.type != 'reference' THEN 'shared'
+                      WHEN c.source_id=? THEN 'cites'
+                      ELSE 'cited_by'
+                  END AS direction
            FROM connections c
            JOIN captures cap ON cap.id = CASE
                WHEN c.source_id=? THEN c.target_id
                ELSE c.source_id
            END
-           WHERE c.source_id=? OR c.target_id=?
-           ORDER BY c.strength DESC""",
-        (capture_id, capture_id, capture_id),
+           WHERE (c.source_id=? OR c.target_id=?){vol_sql}
+           ORDER BY (c.type='reference') DESC, c.strength DESC""",
+        [capture_id, capture_id, capture_id, capture_id] + vol_params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -380,15 +566,23 @@ def get_question_captures(con: sqlite3.Connection) -> list[dict]:
     return results
 
 
-def check_duplicate(con: sqlite3.Connection, template_id: str) -> dict | None:
+def check_duplicate(
+    con: sqlite3.Connection,
+    template_id: str,
+    volume: int | None = None,
+) -> dict | None:
     """
-    Return the existing capture dict if *template_id* is already in the DB,
-    otherwise None.
+    Return the existing capture dict if *template_id* is already stored,
+    otherwise None. When *volume* is given, only that volume collides — a
+    second journal legitimately starts over at RC-001.
     """
-    row = con.execute(
-        "SELECT id, template_id, summary, created_at FROM captures WHERE template_id=? COLLATE NOCASE",
-        (template_id,),
-    ).fetchone()
+    sql = ("SELECT id, template_id, volume, summary, created_at FROM captures "
+           "WHERE template_id=? COLLATE NOCASE")
+    params: list[Any] = [template_id]
+    if volume is not None:
+        sql += " AND volume=?"
+        params.append(volume)
+    row = con.execute(sql + " ORDER BY volume DESC", params).fetchone()
     return dict(row) if row else None
 
 
@@ -408,18 +602,22 @@ def get_journal_kpis(con: sqlite3.Connection) -> dict:
     four_weeks_ago = (now - timedelta(weeks=4)).isoformat()
     one_week_ago   = (now - timedelta(weeks=1)).isoformat()
 
+    # KPIs measure the OWNER'S practice: hand-written journal captures only.
+    # AI-extracted entries (source='ai_extract') would inflate velocity and
+    # synthesis figures meaninglessly.
+
     # Totals by type
     type_counts = {
         row["type"]: row["cnt"]
         for row in con.execute(
-            "SELECT type, COUNT(*) AS cnt FROM captures GROUP BY type"
+            "SELECT type, COUNT(*) AS cnt FROM captures WHERE source='journal' GROUP BY type"
         ).fetchall()
     }
     total = sum(type_counts.values())
 
     # Capture velocity: per week over last 4 weeks
     recent = con.execute(
-        "SELECT COUNT(*) AS cnt FROM captures WHERE created_at >= ?",
+        "SELECT COUNT(*) AS cnt FROM captures WHERE created_at >= ? AND source='journal'",
         (four_weeks_ago,),
     ).fetchone()["cnt"]
     capture_velocity = round(recent / 4, 1)
@@ -428,7 +626,7 @@ def get_journal_kpis(con: sqlite3.Connection) -> dict:
     insights_recent = con.execute(
         """SELECT COUNT(*) AS cnt FROM tags t
            JOIN captures c ON c.id = t.capture_id
-           WHERE t.prefix='$' AND c.created_at >= ?""",
+           WHERE t.prefix='$' AND c.created_at >= ? AND c.source='journal'""",
         (four_weeks_ago,),
     ).fetchone()["cnt"]
     insight_velocity = round(insights_recent / 4, 1)
@@ -447,7 +645,8 @@ def get_journal_kpis(con: sqlite3.Connection) -> dict:
     question_caps = con.execute(
         """SELECT DISTINCT c.id, c.created_at
            FROM captures c
-           JOIN tags t ON t.capture_id = c.id AND t.prefix = '?'""",
+           JOIN tags t ON t.capture_id = c.id AND t.prefix = '?'
+           WHERE c.source='journal'""",
     ).fetchall()
 
     unanswered = []
@@ -497,11 +696,16 @@ def get_captures_by_tag(
     tag_value: str,
     prefix: str = "",
     limit: int = 200,
+    role: str = "",
+    volumes: list[int] | None = None,
 ) -> list[dict]:
     """
     Return all captures that carry a tag matching *tag_value* (case-insensitive).
-    Optionally filter by *prefix* (e.g. '#', '@', '?', '$', '!', '->').
-    Results sorted by created_at descending.
+    Optionally filter by *prefix* (the character as written: '#', '@', '?',
+    '$', '!', '*', '->') and/or *role* (the canonical meaning: 'topic',
+    'theme', 'priority', 'motif', 'entity', ...). Results sorted by
+    created_at descending. Each capture row includes the roles its matching
+    tag carries, so callers can report prefix-collision splits.
     """
     clauses = ["LOWER(t.value) = LOWER(?)"]
     params: list[Any] = [tag_value]
@@ -509,17 +713,21 @@ def get_captures_by_tag(
     if prefix:
         clauses.append("t.prefix = ?")
         params.append(prefix)
+    if role:
+        clauses.append("t.role = ?")
+        params.append(role)
 
     where = " AND ".join(clauses)
+    vol_sql, vol_params = _volume_where(volumes)
     rows = con.execute(
-        f"""SELECT DISTINCT c.id, c.type, c.template_id, c.summary,
-                   c.confidence, c.created_at
+        f"""SELECT DISTINCT c.id, c.type, c.template_id, c.volume, c.summary,
+                   c.confidence, c.created_at, t.role AS matched_role
             FROM captures c
             JOIN tags t ON t.capture_id = c.id
-            WHERE {where}
+            WHERE {where}{vol_sql}
             ORDER BY c.created_at DESC
             LIMIT ?""",
-        params + [limit],
+        params + vol_params + [limit],
     ).fetchall()
 
     results = []
@@ -527,7 +735,7 @@ def get_captures_by_tag(
         r = dict(row)
         r["tags"] = [
             dict(t) for t in con.execute(
-                "SELECT prefix, value FROM tags WHERE capture_id=?", (r["id"],)
+                "SELECT prefix, value, role FROM tags WHERE capture_id=?", (r["id"],)
             ).fetchall()
         ]
         results.append(r)
@@ -665,6 +873,7 @@ def search_fts(
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 20,
+    volumes: list[int] | None = None,
 ) -> list[dict]:
     """Full-text search with optional tag and date filters."""
     # Quote every token so FTS5 operators and punctuation ('.', '-', NEAR,
@@ -691,14 +900,16 @@ def search_fts(
         params.append(date_to)
 
     extra_where = ("AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
+    vol_sql, vol_params = _volume_where(volumes)
+    params.extend(vol_params)
     params.append(limit)
 
     rows = con.execute(
-        f"""SELECT c.id, c.type, c.template_id, c.summary, c.confidence, c.created_at,
+        f"""SELECT c.id, c.type, c.template_id, c.volume, c.summary, c.confidence, c.created_at,
                    rank
             FROM captures_fts
             JOIN captures c ON c.id = captures_fts.rowid
-            WHERE captures_fts MATCH ? {extra_where}
+            WHERE captures_fts MATCH ? {extra_where}{vol_sql}
             ORDER BY rank
             LIMIT ?""",
         params,
@@ -1002,6 +1213,210 @@ def migrate_add_corrected_ocr(db_path: Path | None = None) -> None:
         con.close()
 
 
+def migrate_v3(db_path: Path | None = None) -> bool:
+    """
+    One-shot server 3.0 schema migration (§1.13 of the spec). All schema
+    changes land as a single unit, in one transaction:
+
+      - template_id becomes nullable ('unidentified' pages are stored)
+      - page_suffix column (NULL back-fill)
+      - volume column (back-fill 1) + composite unique index
+      - entities / capture_entities tables (empty — no legacy back-fill)
+      - tags.display (back-fill = value) and tags.role (derived from
+        prefix + template type, a pure function of stored data)
+      - captures.source ('journal' back-fill; existing AIEX rows → 'ai_extract')
+      - settings table (active_volumes='*', current_volume=1)
+      - connections table is cleared: the caller MUST run rebuild_connections
+        afterwards (edge semantics changed — IDF strengths, typed dedup)
+
+    Copies captures.db to captures.db.bak-v3 before touching anything.
+    Safe to call on every startup — no-op once applied. Returns True only
+    when the migration actually ran (caller then rebuilds connections).
+    """
+    path = db_path or _DEFAULT_DB
+    if not path.exists():
+        return False
+
+    con = sqlite3.connect(str(path), isolation_level=None)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA foreign_keys=OFF")
+
+    try:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(captures)").fetchall()]
+        if not cols:
+            return False   # no captures table — init_db creates v3 directly
+        if "volume" in cols:
+            return False   # already migrated
+
+        # Flush WAL so the file copy is a complete backup.
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        shutil.copy2(path, path.with_name(path.name + ".bak-v3"))
+
+        has_corrected = "corrected_ocr" in cols
+        corrected_src = "corrected_ocr" if has_corrected else "NULL"
+
+        con.execute("BEGIN")
+        try:
+            # ── captures ──────────────────────────────────────────────────
+            con.execute("ALTER TABLE captures RENAME TO _captures_v2")
+            for trigger in ("captures_fts_insert", "captures_fts_delete", "captures_fts_update"):
+                con.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            con.execute("DROP TABLE IF EXISTS captures_fts")
+
+            con.execute("""
+                CREATE TABLE captures (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX','UNKNOWN')),
+                    template_id TEXT,
+                    page_suffix TEXT,
+                    volume      INTEGER NOT NULL DEFAULT 1,
+                    content_json TEXT NOT NULL,
+                    raw_ocr     TEXT NOT NULL,
+                    corrected_ocr TEXT,
+                    summary     TEXT NOT NULL DEFAULT '',
+                    confidence  REAL NOT NULL DEFAULT 0.0,
+                    image_path  TEXT NOT NULL DEFAULT '',
+                    source      TEXT NOT NULL DEFAULT 'journal',
+                    created_at  TEXT NOT NULL
+                )
+            """)
+            con.execute(f"""
+                INSERT INTO captures (id, type, template_id, page_suffix, volume,
+                                      content_json, raw_ocr, corrected_ocr, summary,
+                                      confidence, image_path, source, created_at)
+                SELECT id, type, template_id, NULL, 1,
+                       content_json, raw_ocr, {corrected_src}, summary,
+                       confidence, image_path,
+                       CASE WHEN type='AIEX' THEN 'ai_extract' ELSE 'journal' END,
+                       created_at
+                FROM _captures_v2
+            """)
+            con.execute("DROP TABLE _captures_v2")
+
+            # ── tags (adds display + role) ────────────────────────────────
+            con.execute("""
+                CREATE TABLE _tags_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    capture_id  INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    prefix      TEXT NOT NULL,
+                    value       TEXT NOT NULL,
+                    display     TEXT,
+                    role        TEXT
+                )
+            """)
+            con.execute("""
+                INSERT INTO _tags_new (id, capture_id, prefix, value, display, role)
+                SELECT id, capture_id, prefix, value, value, NULL FROM tags
+            """)
+            con.execute("DROP TABLE tags")
+            con.execute("ALTER TABLE _tags_new RENAME TO tags")
+
+            # ── connections: recreate empty (caller rebuilds) ─────────────
+            con.execute("DROP TABLE connections")
+            con.execute("""
+                CREATE TABLE connections (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id   INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    target_id   INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    type        TEXT NOT NULL,
+                    strength    REAL NOT NULL DEFAULT 1.0,
+                    method      TEXT NOT NULL
+                )
+            """)
+
+            # ── new tables ────────────────────────────────────────────────
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS entities (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT NOT NULL,
+                    normalized  TEXT NOT NULL,
+                    kind        TEXT NOT NULL DEFAULT 'other',
+                    UNIQUE(normalized, kind)
+                )
+            """)
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS capture_entities (
+                    capture_id  INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                    entity_id   INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                    source      TEXT NOT NULL DEFAULT 'extracted',
+                    PRIMARY KEY (capture_id, entity_id)
+                )
+            """)
+            con.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+            con.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('active_volumes', '*')")
+            con.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('current_volume', '1')")
+
+            # ── indexes ───────────────────────────────────────────────────
+            con.execute("CREATE INDEX IF NOT EXISTS idx_tags_capture ON tags(capture_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_tags_value   ON tags(prefix, value)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_conn_source  ON connections(source_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_conn_target  ON connections(target_id)")
+            con.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_vol_tid
+                    ON captures(volume, template_id, COALESCE(page_suffix, ''))
+            """)
+            con.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_conn_unique
+                    ON connections(source_id, target_id, type)
+            """)
+
+            # ── FTS ───────────────────────────────────────────────────────
+            con.execute("""
+                CREATE VIRTUAL TABLE captures_fts USING fts5(
+                    raw_ocr, summary, content='captures', content_rowid='id'
+                )
+            """)
+            con.execute("""
+                INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                SELECT id, COALESCE(corrected_ocr, raw_ocr), summary FROM captures
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_insert AFTER INSERT ON captures BEGIN
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_delete AFTER DELETE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_update AFTER UPDATE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
+                END
+            """)
+
+            # ── tags.role back-fill: pure function of stored data ─────────
+            from .templates import assign_role
+            rows = con.execute(
+                """SELECT t.id, t.prefix, t.value, c.type
+                   FROM tags t JOIN captures c ON c.id = t.capture_id"""
+            ).fetchall()
+            for r in rows:
+                con.execute(
+                    "UPDATE tags SET role=? WHERE id=?",
+                    (assign_role(r["prefix"], r["value"], r["type"]), r["id"]),
+                )
+            # NOTE: entities are deliberately NOT back-filled from legacy OCR —
+            # Tesseract-quality cursive output would populate the table with
+            # noise worse than an empty table (§1.13 rule 7).
+
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        return True
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.close()
+
+
 def get_next_aiex_id(con: sqlite3.Connection) -> str:
     """Return the next sequential AIEX-NNN template ID."""
     row = con.execute(
@@ -1012,27 +1427,40 @@ def get_next_aiex_id(con: sqlite3.Connection) -> str:
     return f"AIEX-{next_num:03d}"
 
 
-def get_stats(con: sqlite3.Connection) -> dict:
+def get_stats(con: sqlite3.Connection, volumes: list[int] | None = None) -> dict:
+    vol_sql, vol_params = _volume_where(volumes)
+    where = f"WHERE 1=1{vol_sql}"
     counts = {
         row["type"]: row["cnt"]
         for row in con.execute(
-            "SELECT type, COUNT(*) AS cnt FROM captures GROUP BY type"
+            f"SELECT type, COUNT(*) AS cnt FROM captures c {where} GROUP BY type",
+            vol_params,
         ).fetchall()
     }
     top_tags = con.execute(
-        """SELECT prefix || value AS tag, COUNT(*) AS cnt
-           FROM tags GROUP BY prefix, value ORDER BY cnt DESC LIMIT 10"""
+        f"""SELECT t.prefix || t.value AS tag, COUNT(*) AS cnt
+           FROM tags t JOIN captures c ON c.id = t.capture_id
+           WHERE 1=1{vol_sql}
+           GROUP BY t.prefix, t.value ORDER BY cnt DESC LIMIT 10""",
+        vol_params,
     ).fetchall()
     questions = con.execute(
-        "SELECT COUNT(*) AS cnt FROM tags WHERE prefix='?'"
+        f"""SELECT COUNT(*) AS cnt FROM tags t JOIN captures c ON c.id = t.capture_id
+           WHERE t.prefix='?'{vol_sql}""",
+        vol_params,
     ).fetchone()["cnt"]
     insights = con.execute(
-        "SELECT COUNT(*) AS cnt FROM tags WHERE prefix='$'"
+        f"""SELECT COUNT(*) AS cnt FROM tags t JOIN captures c ON c.id = t.capture_id
+           WHERE t.prefix='$'{vol_sql}""",
+        vol_params,
     ).fetchone()["cnt"]
     date_range = con.execute(
-        "SELECT MIN(created_at) AS earliest, MAX(created_at) AS latest FROM captures"
+        f"SELECT MIN(created_at) AS earliest, MAX(created_at) AS latest FROM captures c {where}",
+        vol_params,
     ).fetchone()
-    total = con.execute("SELECT COUNT(*) AS cnt FROM captures").fetchone()["cnt"]
+    total = con.execute(
+        f"SELECT COUNT(*) AS cnt FROM captures c {where}", vol_params
+    ).fetchone()["cnt"]
 
     return {
         "total_captures": total,

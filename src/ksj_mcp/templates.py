@@ -32,31 +32,94 @@ _ARROW_TAG = re.compile(
     re.UNICODE,
 )
 
+# @-values that look like a template ID are references; anything else is a
+# named entity (dream symbol, person, place, work). The DC template shipped
+# this convention on paper first — @symbol — and it generalizes.
+_TEMPLATE_ID_VALUE = re.compile(r'^(RC|SYN|REV|DC|AIEX)-?\d{1,4}[a-z]?$', re.IGNORECASE)
 
-def extract_schema_tags(text: str) -> list[dict[str, str]]:
+
+def normalize_tag_value(value: str) -> str:
+    """
+    Canonical tag form: casefold, collapse whitespace/underscores to a single
+    hyphen, collapse hyphen runs. "DOG MAN", "Dog-Man", and "DOG-MAN" all
+    normalize to "dog-man". The original string belongs in the tag's
+    "display" field.
+    """
+    v = value.casefold().strip()
+    v = re.sub(r'[\s_]+', '-', v)
+    v = re.sub(r'-{2,}', '-', v)
+    return v.strip('-')
+
+
+def assign_role(prefix: str, value: str, template_type: str = "") -> str:
+    """
+    Canonical semantic role for a tag, derived from (prefix, template_type).
+
+    The same prefix character means different things on DC pages than on
+    RC/SYN/REV — the paper cannot change, so the meaning is recorded
+    server-side. The literal prefix is always stored as written.
+    """
+    is_dc = template_type.upper() == "DC"
+    if prefix == "#":
+        return "theme" if is_dc else "topic"
+    if prefix == "@":
+        return "reference" if _TEMPLATE_ID_VALUE.match(value) else "entity"
+    if prefix == "!":
+        return "motif" if is_dc else "priority"
+    if prefix == "?":
+        return "question"
+    if prefix == "$":
+        return "insight"
+    if prefix == "->":
+        return "causal"
+    if prefix == "*":
+        return "sensory"
+    return "topic"
+
+
+def extract_schema_tags(text: str, template_type: str = "") -> list[dict[str, str]]:
     """
     Extract all schema-prefixed tags from *text*.
 
-    Returns a list of dicts: [{"prefix": "#", "value": "machine-learning"}, ...]
-    Arrow tags are stored as: {"prefix": "->", "value": "A->B"}
+    Returns a list of dicts:
+      [{"prefix": "#", "value": "machine-learning",
+        "display": "Machine-Learning", "role": "topic"}, ...]
+    Arrow tags are stored as: {"prefix": "->", "value": "a->b", ...}
+
+    *template_type* drives role assignment for DC-variant prefixes; when
+    omitted, the RC/SYN/REV meanings are used.
     """
     tags: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
-    for m in _INLINE_TAG.finditer(text):
-        prefix, value = m.group(1), m.group(2).lower()
+    def _add(prefix: str, raw_value: str) -> None:
+        value = normalize_tag_value(raw_value)
+        if not value:
+            return
         key = (prefix, value)
         if key not in seen:
             seen.add(key)
-            tags.append({"prefix": prefix, "value": value})
+            tags.append({
+                "prefix":  prefix,
+                "value":   value,
+                "display": raw_value,
+                "role":    assign_role(prefix, value, template_type),
+            })
+
+    for m in _INLINE_TAG.finditer(text):
+        prefix = m.group(1)
+        # '*' is both an OCR-noise artifact and the markdown emphasis
+        # character. A '*' that is part of *emphasis* or **bold** is not a
+        # sensory tag: skip when the match is bounded by another '*'.
+        if prefix == "*":
+            before = text[m.start() - 1] if m.start() > 0 else ""
+            after  = text[m.end()] if m.end() < len(text) else ""
+            if before == "*" or after == "*":
+                continue
+        _add(prefix, m.group(2))
 
     for m in _ARROW_TAG.finditer(text):
-        left, right = m.group(1).lower(), m.group(2).lower()
-        value = f"{left}->{right}"
-        key = ("->", value)
-        if key not in seen:
-            seen.add(key)
-            tags.append({"prefix": "->", "value": value})
+        _add("->", f"{m.group(1)}->{m.group(2)}")
 
     return tags
 
@@ -97,6 +160,7 @@ def parse_rc(text: str) -> dict[str, Any]:
     return {
         "first_impressions": _extract_section(text, "first impressions", "impressions"),
         "key_points": _extract_section(text, "key points", "key point", "points"),
+        "quick_questions": _extract_section(text, "quick questions"),
         "tags_raw": _extract_section(text, "tags", "tag"),
     }
 
@@ -182,6 +246,55 @@ _PARSERS = {
 }
 
 
+def _positional_tags(
+    fields: dict[str, Any],
+    template_type: str,
+    seen: set[tuple[str, str]],
+) -> list[dict[str, str]]:
+    """
+    Tags implied by *where* content was written, not by a prefix character.
+
+    - Content in the Tags section (the printed tag bubbles) is a tag whether
+      or not the user wrote the '#' — the bubble is positional evidence.
+    - Content in Quick Questions is a '?' question whether or not the
+      character was written.
+    """
+    extra: list[dict[str, str]] = []
+
+    def _add(prefix: str, raw: str) -> None:
+        value = normalize_tag_value(raw)
+        if not value or (prefix, value) in seen:
+            return
+        seen.add((prefix, value))
+        extra.append({
+            "prefix":  prefix,
+            "value":   value,
+            "display": raw,
+            "role":    assign_role(prefix, value, template_type),
+        })
+
+    # Tag bubbles: split on separators; a single space stays inside one tag
+    # ("DOG MAN" is one bubble, not two tags).
+    for cand in re.split(r'[\n,;|•]+|\s{2,}', fields.get("tags_raw", "") or ""):
+        cand = cand.strip()
+        if not cand or cand[0] in "#@!?$*":
+            continue  # prefixed content is handled by the inline extractor
+        if not re.search(r'\w{2,}', cand):
+            continue  # OCR noise / stray marks
+        if len(cand) > 40 or len(cand.split()) > 4:
+            continue  # prose that leaked into the section, not a tag
+        _add("#", cand)
+
+    # Quick Questions: each line is a question.
+    for line in (fields.get("quick_questions", "") or "").splitlines():
+        line = line.strip().lstrip("?").strip()
+        if not re.search(r'\w{2,}', line):
+            continue
+        _add("?", line)
+
+    return extra
+
+
 def parse_template(template_type: str, raw_text: str) -> dict[str, Any]:
     """
     Parse *raw_text* using the appropriate template parser.
@@ -189,7 +302,7 @@ def parse_template(template_type: str, raw_text: str) -> dict[str, Any]:
     Returns a dict with:
       - parsed content fields
       - "summary": auto-generated one-liner
-      - "tags": list of schema tag dicts
+      - "tags": list of schema tag dicts (prefix, value, display, role)
     """
     parser = _PARSERS.get(template_type.upper())
     if parser is None:
@@ -199,7 +312,9 @@ def parse_template(template_type: str, raw_text: str) -> dict[str, Any]:
         fields = parser(raw_text)
 
     # Extract schema tags from the entire raw text (catches tags anywhere on the page)
-    tags = extract_schema_tags(raw_text)
+    tags = extract_schema_tags(raw_text, template_type)
+    seen = {(t["prefix"], t["value"]) for t in tags}
+    tags.extend(_positional_tags(fields, template_type, seen))
     summary = _build_summary(fields)
 
     return {

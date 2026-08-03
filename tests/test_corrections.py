@@ -14,6 +14,7 @@ from ksj_mcp.database import (
     insert_capture,
     insert_tags,
     migrate_add_corrected_ocr,
+    migrate_v3,
     search_fts,
     update_capture_correction,
 )
@@ -194,8 +195,11 @@ class TestMigrateAddCorrectedOcr:
         migrate_add_corrected_ocr(db_path)  # second run is a no-op
 
     def test_correction_works_after_migration(self, tmp_path):
+        # Full startup chain: corrected_ocr migration, then the v3 rebuild
+        # (correction needs v3's connection unique index to rebuild edges).
         db_path = self._make_old_db(tmp_path)
         migrate_add_corrected_ocr(db_path)
+        assert migrate_v3(db_path) is True
 
         con = get_connection(db_path)
         assert search_fts(con, "legacy") != []

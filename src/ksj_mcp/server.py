@@ -1,10 +1,14 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-17 tools:
+21 tools:
   manual_capture     — Store a capture from assistant-transcribed text (primary path)
   upload_capture     — OCR a journal photo locally (Tesseract) and store it
   correct_ocr        — Replace a stored capture's transcription; re-parse and reconnect
+  identify_capture   — Assign/fix the template ID of a stored (or unidentified) capture
+  set_volume         — Configure which journal volume is written to / searched
+  assert_entity      — Manually link a named entity (person, place, symbol) to a capture
+  rebuild_connections— Re-derive the whole connection graph from current tags and text
   bulk_upload        — Process a whole folder of photos at once
   search_captures    — Full-text search with optional filters
   list_by_tag        — Browse all captures with a given tag or prefix
@@ -31,9 +35,16 @@ from mcp.server.fastmcp import FastMCP
 
 from .database import (
     check_duplicate,
+    get_active_volumes,
     get_capture,
     get_captures_by_tag,
+    get_captures_for_entity,
     get_connections,
+    get_current_volume,
+    get_entities_for_capture,
+    link_capture_entity,
+    migrate_v3,
+    set_setting,
     get_dc_pattern_data,
     get_journal_kpis,
     get_next_aiex_id,
@@ -53,8 +64,8 @@ from .database import (
     update_capture_correction,
     get_connection,
 )
-from .connections import build_connections
-from .ocr import OcrNotAvailableError, detect_template_type, extract_text
+from .connections import build_connections, rebuild_connections as db_rebuild_connections
+from .ocr import OcrNotAvailableError, detect_template_type, extract_text, parse_template_id
 from .templates import parse_template
 
 # ── Server init ───────────────────────────────────────────────────────────────
@@ -92,7 +103,8 @@ Use extract_insights() to prepare a session, then commit_aiex() to store.
 ## Schema Tag System
 RC, SYN, REV pages:
 - `#topic` — subject or theme
-- `@source` — origin of information
+- `@source` — origin of information (a template ID like @RC-012 is a
+  reference; any other @-value is a named entity: @Veronica, @UCLA)
 - `!priority` — urgent or important
 - `?question` — open questions
 - `$insight` — breakthrough realization
@@ -100,9 +112,22 @@ RC, SYN, REV pages:
 
 DC (Dream Capture) pages use a dream-specific variant:
 - `#theme` — dream theme or subject
-- `@symbol` — recurring symbol or character
+- `@symbol` — recurring symbol or character (these are entities too)
 - `!recurring` — recurring dream motif
 - `*sensory` — sensory detail (unique to DC)
+
+The server stores each tag's semantic ROLE alongside the character as
+written (topic vs theme, priority vs motif, reference vs entity), so query
+tools can disambiguate — use the role parameter on list_by_tag when it
+matters. Content written inside tag bubbles counts as a tag even without
+the prefix character.
+
+## Volumes
+Each physical journal is a volume; volume 2 continues volume 1's knowledge
+base and cross-volume connections are expected. When a user starts a new
+journal, call set_volume(current_volume=N) once. If an upload reports a
+template-ID collision, ask whether this is a new journal (new volume) or a
+re-capture of the same page (force=True).
 
 ## What You Can Do
 - Search and retrieve entries by tag, template, or concept
@@ -143,11 +168,25 @@ def _data_dir() -> Path:
 _DB_PATH     = _data_dir() / "captures.db"
 _IMAGES_DIR  = _data_dir() / "images"
 
-init_db(_DB_PATH)
+# Migrations run BEFORE init_db: on an old database they rebuild it to the
+# current schema; on a fresh install they are no-ops and init_db creates the
+# current schema directly. (init_db's CREATE INDEX statements assume current
+# columns, so it must not run first against an old schema.)
 migrate_add_aiex(_DB_PATH)
 migrate_fix_fk_references(_DB_PATH)
 migrate_add_corrected_ocr(_DB_PATH)
+_v3_migrated = migrate_v3(_DB_PATH)
+init_db(_DB_PATH)
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+if _v3_migrated:
+    # §1.13 rule 8: edge semantics changed (IDF strengths, typed dedup), so
+    # the graph is re-derived from current tags and text after migration.
+    _con = get_connection(_DB_PATH)
+    try:
+        db_rebuild_connections(_con)
+    finally:
+        _con.close()
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 
@@ -156,12 +195,33 @@ def _db():
     return get_connection(_DB_PATH)
 
 
+def _read_scope(con) -> tuple[list[int] | None, str]:
+    """
+    Active read scope: (volumes, note). volumes is None when all volumes are
+    visible; the note is appended to tool output whenever a filter is active —
+    a tool whose purpose is catching forgotten prior work must never silently
+    hide prior volumes (§1.5).
+    """
+    vols = get_active_volumes(con)
+    if vols is None:
+        return None, ""
+    return vols, (
+        f"\n\nScope: volume(s) {', '.join(map(str, vols))} — other volumes are "
+        f"excluded. Use set_volume(active_volumes='*') to search everything."
+    )
+
+
 # ── Shared upload helper ──────────────────────────────────────────────────────
 
-def _process_image(image_path: str, force: bool = False) -> dict:
+def _process_image(image_path: str, force: bool = False, volume: int = 0) -> dict:
     """
-    Core upload pipeline: OCR → duplicate check → parse → store → copy image
-    → detect connections → highlight strongest connection.
+    Core upload pipeline: OCR → identify (tiered) → volume-aware duplicate
+    check → parse → store → copy image → detect connections → highlight.
+
+    OCR always runs and the page is ALWAYS stored — identification failure
+    stores the page as UNIDENTIFIED rather than discarding the photo, since
+    the photo (that page, in that light, at that moment) is the expensive
+    irreversible part and the six-character ID is the cheap recoverable one.
 
     Returns a result dict:
       {
@@ -176,6 +236,8 @@ def _process_image(image_path: str, force: bool = False) -> dict:
         "highlight":    dict | None,   # strongest / most surprising connection
         "duplicate":    dict | None,   # existing capture if dupe was found
         "stored_image": str,           # path inside data/images/
+        "volume":       int | None,
+        "unidentified": bool,
       }
     """
     result = {
@@ -183,6 +245,7 @@ def _process_image(image_path: str, force: bool = False) -> dict:
         "template_id": "", "summary": "", "tags": [],
         "confidence": 0.0, "connections": [], "highlight": None,
         "duplicate": None, "stored_image": "",
+        "volume": None, "unidentified": False, "_id_note": "",
     }
 
     # OCR
@@ -200,18 +263,11 @@ def _process_image(image_path: str, force: bool = False) -> dict:
 
     raw_text      = ocr_result["raw_text"]
     template_type = ocr_result["template_type"]
-    template_id   = ocr_result["template_id"]
+    template_id   = ocr_result["template_id"] or None
+    page_suffix   = ocr_result.get("page_suffix")
+    page_volume   = ocr_result.get("volume")
+    id_conf       = ocr_result.get("id_confidence", 1.0 if template_id else 0.0)
     confidence    = ocr_result["confidence"]
-
-    if template_type == "UNKNOWN":
-        result["error"] = (
-            "Could not detect a template ID (RC-XXX / SYN-XXX / REV-XXX / DC-XXX). "
-            "Make sure the template number is visible and the photo is clear.\n"
-            "Tip: try better lighting or hold the camera more parallel to the page."
-        )
-        if confidence < 0.6:
-            result["error"] += f"\nOCR confidence was low ({confidence:.0%}) — retaking the photo may help."
-        return result
 
     # Low-confidence warning (non-fatal)
     low_conf_warning = ""
@@ -221,21 +277,39 @@ def _process_image(image_path: str, force: bool = False) -> dict:
             "or holding the camera more parallel to the page."
         )
 
-    result["template_id"] = template_id
+    result["template_id"] = template_id or ""
     result["confidence"]  = confidence
 
     with _db() as con:
-        # Duplicate detection
-        existing = check_duplicate(con, template_id)
-        if existing and not force:
-            result["duplicate"] = existing
-            result["error"] = (
-                f"{template_id} already exists in your knowledge base "
-                f"(stored {existing['created_at'][:10]}, #{existing['id']}).\n"
-                f"  Summary: {existing['summary'] or '(none)'}\n\n"
-                f"To replace it, upload again with force=True."
-            )
-            return result
+        # Volume resolution (§1.4): written on the page > per-upload
+        # parameter > stored default.
+        vol = page_volume or volume or get_current_volume(con)
+        result["volume"] = vol
+
+        if template_type == "UNKNOWN":
+            # §1.2: identification failed, but the page is stored anyway.
+            result["unidentified"] = True
+        else:
+            # Duplicate detection is per volume: a second journal
+            # legitimately starts over at RC-001.
+            existing = check_duplicate(con, template_id, volume=vol)
+            if existing and not force:
+                result["duplicate"] = existing
+                any_vol = check_duplicate(con, template_id)
+                result["error"] = (
+                    f"{template_id} already exists in volume {existing['volume']} "
+                    f"(stored {existing['created_at'][:10]}, #{existing['id']}).\n"
+                    f"  Summary: {existing['summary'] or '(none)'}\n\n"
+                    f"Is this a page from a NEW journal? Upload again with "
+                    f"volume={existing['volume'] + 1}, or run "
+                    f"set_volume(current_volume={existing['volume'] + 1}) once when "
+                    f"starting a new book.\n"
+                    f"Re-uploading the SAME page (e.g. a cleaner photo)? Use force=True to replace it."
+                )
+                return result
+            if existing and force:
+                con.execute("DELETE FROM captures WHERE id=?", (existing["id"],))
+                con.commit()
 
         # Parse template
         parsed  = parse_template(template_type, raw_text)
@@ -248,7 +322,7 @@ def _process_image(image_path: str, force: bool = False) -> dict:
         # Copy image to data/images/ for self-containment
         src = Path(image_path)
         ts  = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        dest = _IMAGES_DIR / f"{template_id}_{ts}{src.suffix.lower()}"
+        dest = _IMAGES_DIR / f"{template_id or 'unidentified'}_{ts}{src.suffix.lower()}"
         try:
             shutil.copy2(src, dest)
             stored_image = str(dest)
@@ -267,9 +341,24 @@ def _process_image(image_path: str, force: bool = False) -> dict:
             summary=summary,
             confidence=confidence,
             image_path=stored_image,
+            volume=vol,
+            page_suffix=page_suffix,
         )
         insert_tags(con, capture_id, tags)
         con.commit()
+
+        if result["unidentified"]:
+            result["_id_note"] = (
+                f"\n  ⚠ No template ID detected — stored as UNIDENTIFIED (#{capture_id}).\n"
+                f"    The text and tags are safe. Fix the ID any time with "
+                f"identify_capture({capture_id}, \"RC-001\"), or re-run the text "
+                f"with correct_ocr({capture_id}, ...) from a cleaner read."
+            )
+        elif id_conf < 1.0:
+            result["_id_note"] = (
+                f"\n  ⚠ Template ID read loosely as {template_id} — if that's wrong, "
+                f"call identify_capture({capture_id}, \"<correct-id>\")."
+            )
 
         # Detect connections
         connections = build_connections(con, capture_id)
@@ -321,9 +410,13 @@ def _format_upload_result(r: dict, image_path: str) -> str:
         return r["error"]
 
     tag_list = ", ".join(f"{t['prefix']}{t['value']}" for t in r["tags"]) or "none"
+    template_label = r["template_id"] or "UNIDENTIFIED"
+    if r.get("template_id") and r.get("page_suffix"):
+        template_label += r["page_suffix"]
     lines = [
         f"Stored capture #{r['capture_id']}",
-        f"  Template : {r['template_id']}",
+        f"  Template : {template_label}",
+        f"  Volume   : {r.get('volume') or 1}",
         f"  Summary  : {r['summary'] or '(empty)'}",
         f"  Tags     : {tag_list}",
         f"  OCR conf : {r['confidence']:.0%}",
@@ -331,6 +424,8 @@ def _format_upload_result(r: dict, image_path: str) -> str:
 
     if r.get("_low_conf"):
         lines.append(r["_low_conf"])
+    if r.get("_id_note"):
+        lines.append(r["_id_note"])
 
     conns = r["connections"]
     if not conns:
@@ -357,28 +452,34 @@ def _format_upload_result(r: dict, image_path: str) -> str:
 # ── Tool: upload_capture ──────────────────────────────────────────────────────
 
 @mcp.tool()
-def upload_capture(image_path: str, force: bool = False) -> str:
+def upload_capture(image_path: str, force: bool = False, volume: int = 0) -> str:
     """
     Process a journal page photo: run OCR, parse the template, extract schema
     tags, store the capture, copy the image to the knowledge base, and detect
     connections to existing captures.
 
+    The page is always stored, even when no template ID can be read — it is
+    kept as UNIDENTIFIED and can be fixed later with identify_capture().
+
     Args:
         image_path: Absolute path to the image file (JPG, PNG, TIFF, etc.)
         force:      Set to True to overwrite an existing capture with the same
-                    template ID (default False — warns instead).
+                    template ID in the same volume (default False — warns instead).
+        volume:     Which journal/book this page belongs to. 0 = automatic:
+                    a volume written on the page (e.g. "V2 RC-001") wins,
+                    otherwise the stored current_volume setting (default 1).
 
     Returns a summary of what was found and stored, including the strongest
     connection detected.
     """
-    result = _process_image(image_path, force=force)
+    result = _process_image(image_path, force=force, volume=volume)
     return _format_upload_result(result, image_path)
 
 
 # ── Tool: manual_capture ──────────────────────────────────────────────────────
 
 @mcp.tool()
-def manual_capture(text: str, template_id: str = "", force: bool = False) -> str:
+def manual_capture(text: str, template_id: str = "", force: bool = False, volume: int = 0) -> str:
     """
     Store a journal capture from transcribed text. This is the PRIMARY path
     for handwritten pages: the user shares a photo of the page, YOU (the
@@ -397,50 +498,61 @@ def manual_capture(text: str, template_id: str = "", force: bool = False) -> str
         template_id: Template ID (e.g. "RC-001"). If omitted, the server will
                      try to detect it from the text automatically.
         force:       Set to True to overwrite an existing capture with the
-                     same template ID (default False — warns instead).
+                     same template ID in the same volume (default False — warns).
+        volume:      Which journal/book this page belongs to. 0 = automatic:
+                     a volume written on the page/text wins, otherwise the
+                     stored current_volume setting (default 1).
 
     Returns the same summary as upload_capture, including any connections
     detected to existing captures.
     """
-    # Detect template ID from text if caller did not provide one
-    if template_id:
-        template_type, tid = detect_template_type(template_id)
-        if template_type == "UNKNOWN":
-            # Caller passed something like "RC-001" — try matching directly
-            template_type, tid = detect_template_type(template_id.upper())
-        if template_type == "UNKNOWN":
+    # Detect template ID from the explicit parameter or from the text
+    parsed_id = parse_template_id(template_id) if template_id else parse_template_id(text)
+    if parsed_id["template_type"] == "UNKNOWN":
+        if template_id:
             return (
                 f"Could not parse template ID '{template_id}'. "
                 "Expected format: RC-001, SYN-003, REV-002, DC-005, etc."
             )
-    else:
-        template_type, tid = detect_template_type(text)
-        if template_type == "UNKNOWN":
-            return (
-                "Could not detect a template ID (RC-XXX / SYN-XXX / REV-XXX / DC-XXX) "
-                "in the provided text. Please pass template_id explicitly, "
-                "e.g. template_id=\"RC-001\"."
-            )
+        return (
+            "Could not detect a template ID (RC-XXX / SYN-XXX / REV-XXX / DC-XXX) "
+            "in the provided text. Please pass template_id explicitly, "
+            "e.g. template_id=\"RC-001\"."
+        )
+    template_type = parsed_id["template_type"]
+    tid           = parsed_id["template_id"]
+    page_suffix   = parsed_id["page_suffix"]
 
     result = {
         "ok": False, "error": None, "capture_id": None,
         "template_id": tid, "summary": "", "tags": [],
         "confidence": 1.0, "connections": [], "highlight": None,
         "duplicate": None, "stored_image": "",
-        "_low_conf": "",
+        "_low_conf": "", "_id_note": "", "volume": None,
+        "unidentified": False, "page_suffix": page_suffix,
     }
 
     with _db() as con:
-        existing = check_duplicate(con, tid)
+        vol = parsed_id["volume"] or volume or get_current_volume(con)
+        result["volume"] = vol
+
+        existing = check_duplicate(con, tid, volume=vol)
         if existing and not force:
             result["duplicate"] = existing
             result["error"] = (
-                f"{tid} already exists in your knowledge base "
+                f"{tid} already exists in volume {existing['volume']} "
                 f"(stored {existing['created_at'][:10]}, #{existing['id']}).\n"
                 f"  Summary: {existing['summary'] or '(none)'}\n\n"
-                f"To replace it, call manual_capture again with force=True."
+                f"Is this a page from a NEW journal? Call manual_capture again with "
+                f"volume={existing['volume'] + 1}, or run "
+                f"set_volume(current_volume={existing['volume'] + 1}) once when "
+                f"starting a new book.\n"
+                f"Re-capturing the SAME page? Use force=True to replace it."
             )
             return _format_upload_result(result, "")
+        if existing and force:
+            con.execute("DELETE FROM captures WHERE id=?", (existing["id"],))
+            con.commit()
 
         parsed  = parse_template(template_type, text)
         summary = parsed["summary"]
@@ -458,6 +570,8 @@ def manual_capture(text: str, template_id: str = "", force: bool = False) -> str
             summary=summary,
             confidence=1.0,
             image_path="",
+            volume=vol,
+            page_suffix=page_suffix,
         )
         insert_tags(con, capture_id, tags)
         con.commit()
@@ -568,15 +682,222 @@ def correct_ocr(capture_id: int, text: str) -> str:
     return "\n".join(lines)
 
 
+# ── Tool: identify_capture ────────────────────────────────────────────────────
+
+@mcp.tool()
+def identify_capture(capture_id: int, template_id: str, volume: int = 0) -> str:
+    """
+    Assign or fix the template ID of a stored capture.
+
+    Use this for pages stored as UNIDENTIFIED (no readable template ID at
+    upload time) or when the ID was misread. Re-parses the stored text with
+    the correct template's parser and rebuilds tags and connections.
+
+    Args:
+        capture_id:  The numeric capture ID (#N in upload output).
+        template_id: The correct template ID, e.g. "RC-007" or "DC-003".
+        volume:      Optionally move the capture to this volume (0 = keep).
+    """
+    parsed_id = parse_template_id(template_id)
+    if parsed_id["template_type"] == "UNKNOWN":
+        return (
+            f"Could not parse template ID '{template_id}'. "
+            "Expected format: RC-001, SYN-003, REV-002, DC-005, etc."
+        )
+    ttype, tid, suffix = (
+        parsed_id["template_type"], parsed_id["template_id"], parsed_id["page_suffix"]
+    )
+
+    with _db() as con:
+        cap = get_capture(con, capture_id)
+        if cap is None:
+            return f"No capture with id #{capture_id}."
+
+        vol = volume or cap.get("volume", 1)
+        existing = check_duplicate(con, tid, volume=vol)
+        if existing and existing["id"] != capture_id:
+            return (
+                f"{tid} already exists in volume {vol} (#{existing['id']}, "
+                f"stored {existing['created_at'][:10]}). If this capture belongs "
+                f"to a different journal, pass volume=N."
+            )
+
+        text    = cap.get("corrected_ocr") or cap["raw_ocr"]
+        parsed  = parse_template(ttype, text)
+        con.execute(
+            """UPDATE captures SET type=?, template_id=?, page_suffix=?, volume=?,
+                                   content_json=?, summary=? WHERE id=?""",
+            (ttype, tid, suffix, vol, json.dumps(parsed["fields"]),
+             parsed["summary"], capture_id),
+        )
+        con.execute("DELETE FROM tags WHERE capture_id=?", (capture_id,))
+        insert_tags(con, capture_id, parsed["tags"])
+        con.execute(
+            "DELETE FROM connections WHERE type='tag_overlap' AND (source_id=? OR target_id=?)",
+            (capture_id, capture_id),
+        )
+        con.execute(
+            "DELETE FROM connections WHERE type='reference' AND source_id=?",
+            (capture_id,),
+        )
+        con.commit()
+        connections = build_connections(con, capture_id)
+
+    tag_list = ", ".join(f"{t['prefix']}{t['value']}" for t in parsed["tags"]) or "none"
+    label = tid + (suffix or "")
+    return (
+        f"Capture #{capture_id} identified as {label} (volume {vol}).\n"
+        f"  Summary : {parsed['summary'] or '(empty)'}\n"
+        f"  Tags    : {tag_list}\n"
+        f"  {len(connections)} connection(s) after re-parse.\n"
+        f"Tip: run rebuild_connections() to pick up any @{tid} references "
+        f"written on other pages before this one was identified."
+    )
+
+
+# ── Tool: set_volume ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def set_volume(current_volume: int = 0, active_volumes: str = "") -> str:
+    """
+    Configure journal volumes: which book new captures go into, and which
+    books are visible to search and browsing.
+
+    Volumes model multiple physical journals: volume 2 continues volume 1's
+    knowledge base (cross-volume connections are normal and expected). Set
+    current_volume once when starting a new book.
+
+    Args:
+        current_volume: Volume for NEW captures (0 = leave unchanged).
+        active_volumes: Read scope for search/list/connections tools:
+                        "*" for all volumes, or a comma list like "2,3".
+                        Empty = leave unchanged. journal_health and
+                        knowledge_progress always see all volumes —
+                        longitudinal KPIs over a truncated history would
+                        mislead.
+
+    Call with no arguments to just see the current settings.
+    """
+    with _db() as con:
+        if current_volume > 0:
+            set_setting(con, "current_volume", str(current_volume))
+        if active_volumes.strip():
+            raw = active_volumes.strip()
+            if raw != "*":
+                try:
+                    vols = sorted({int(v) for v in raw.split(",") if v.strip()})
+                except ValueError:
+                    return f"Could not parse active_volumes {active_volumes!r} — use '*' or e.g. '1,2'."
+                if not vols:
+                    return "active_volumes cannot be empty — use '*' for all volumes."
+                raw = ",".join(str(v) for v in vols)
+            set_setting(con, "active_volumes", raw)
+
+        cur  = get_current_volume(con)
+        vols = get_active_volumes(con)
+        counts = con.execute(
+            "SELECT volume, COUNT(*) AS cnt FROM captures GROUP BY volume ORDER BY volume"
+        ).fetchall()
+
+    scope = "all volumes" if vols is None else f"volume(s) {', '.join(map(str, vols))}"
+    lines = [
+        "Volume settings",
+        f"  New captures go to : volume {cur}",
+        f"  Read scope         : {scope}",
+        "  Captures per volume:",
+    ]
+    if counts:
+        lines += [f"    volume {r['volume']}: {r['cnt']}" for r in counts]
+    else:
+        lines.append("    (no captures yet)")
+    return "\n".join(lines)
+
+
+# ── Tool: assert_entity ───────────────────────────────────────────────────────
+
+@mcp.tool()
+def assert_entity(capture_id: int, name: str, kind: str = "other") -> str:
+    """
+    Manually link a named entity (person, place, work, organization, dream
+    symbol...) to a capture.
+
+    Entities are first-class objects: '@' tags that aren't template IDs
+    create them automatically (e.g. @Veronica, @the-old-house), and this
+    tool covers what extraction missed or mis-typed. Entities are global
+    across volumes — a character in book 1 and book 3 is one entity.
+
+    Args:
+        capture_id: The capture the entity appears in.
+        name:       The entity's name as written (display form).
+        kind:       person | place | work | org | symbol | other
+    """
+    kind = kind.strip().lower() or "other"
+    valid_kinds = {"person", "place", "work", "org", "symbol", "other"}
+    if kind not in valid_kinds:
+        return f"Unknown kind {kind!r} — use one of: {', '.join(sorted(valid_kinds))}."
+    if not name.strip():
+        return "Please provide the entity name."
+
+    with _db() as con:
+        cap = get_capture(con, capture_id)
+        if cap is None:
+            return f"No capture with id #{capture_id}."
+        link_capture_entity(con, capture_id, name=name.strip(), kind=kind, source="asserted")
+        con.commit()
+        appearances = get_captures_for_entity(con, name.strip())
+
+    lines = [
+        f"Entity '{name.strip()}' ({kind}) linked to "
+        f"{cap['template_id'] or 'UNIDENTIFIED'} (#{capture_id}).",
+    ]
+    if len(appearances) > 1:
+        lines.append(f"\nThis entity appears in {len(appearances)} capture(s):")
+        for a in appearances[:10]:
+            lines.append(
+                f"  [{a['template_id'] or 'UNIDENTIFIED'}] vol {a['volume']}  "
+                f"{a['created_at'][:10]}  {a['summary'][:60] or '(no summary)'}"
+            )
+    return "\n".join(lines)
+
+
+# ── Tool: rebuild_connections ─────────────────────────────────────────────────
+
+@mcp.tool()
+def rebuild_connections() -> str:
+    """
+    Re-derive the entire connection graph from current tags and text.
+
+    Run this after correcting OCR text, identifying previously-unidentified
+    pages, or uploading pages out of order — a page that referenced @RC-015
+    before RC-015 existed gets its edge on rebuild. Idempotent: running it
+    twice produces the same graph.
+    """
+    with _db() as con:
+        stats = db_rebuild_connections(con)
+    return (
+        f"Connection graph rebuilt.\n"
+        f"  Captures processed : {stats['captures']}\n"
+        f"  Edges              : {stats['edges']} "
+        f"({stats['references']} reference(s), "
+        f"{stats['edges'] - stats['references']} tag-overlap)"
+    )
+
+
 # ── Tool: bulk_upload ─────────────────────────────────────────────────────────
 
 @mcp.tool()
-def bulk_upload(folder_path: str, force: bool = False) -> str:
+def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
     """
     Process all journal page photos in a folder at once.
 
     Finds every image file (JPG, PNG, TIFF, BMP, WebP) in the folder and runs
     the full upload pipeline on each one. Non-image files are skipped silently.
+    Pages without a readable template ID are stored as UNIDENTIFIED rather
+    than skipped. Pass volume=N when importing a second (or later) journal.
+
+    Note: this path uses local Tesseract OCR, which performs poorly on
+    cursive handwriting. For best results on handwritten pages, share photos
+    in chat and store them via manual_capture instead.
 
     Args:
         folder_path: Absolute path to the folder containing journal photos.
@@ -603,7 +924,7 @@ def bulk_upload(folder_path: str, force: bool = False) -> str:
     lines = [f"Bulk upload — {len(images)} image(s) found in {folder_path}\n{'─' * 50}"]
 
     for img in images:
-        result = _process_image(str(img), force=force)
+        result = _process_image(str(img), force=force, volume=volume)
 
         if result["duplicate"] and not force:
             dupe_count += 1
@@ -669,59 +990,93 @@ def search_captures(
         return "Please provide a search query."
 
     with _db() as con:
+        vols, scope_note = _read_scope(con)
         results = search_fts(
             con,
             query=query,
             tag_filter=tag_filter or None,
             date_from=date_from or None,
             date_to=date_to or None,
+            volumes=vols,
         )
 
     if not results:
-        return f"No captures found for query: {query!r}"
+        return f"No captures found for query: {query!r}" + scope_note
 
     lines = [f"Found {len(results)} capture(s) for {query!r}:\n"]
     for r in results:
         tag_str = " ".join(f"{t['prefix']}{t['value']}" for t in r.get("tags", [])[:5])
+        vol_str = f" vol {r['volume']}" if r.get("volume", 1) != 1 else ""
         lines.append(
-            f"  [{r['template_id']}] #{r['id']}  conf={r['confidence']:.0%}\n"
+            f"  [{r['template_id'] or 'UNIDENTIFIED'}]{vol_str} #{r['id']}  conf={r['confidence']:.0%}\n"
             f"    {r['summary'] or '(no summary)'}\n"
             f"    Tags: {tag_str or 'none'}\n"
             f"    Date: {r['created_at'][:10]}\n"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + scope_note
 
 
 # ── Tool: find_connections ────────────────────────────────────────────────────
 
 @mcp.tool()
-def find_connections(capture_id: int) -> str:
+def find_connections(capture_id: int, min_strength: float = 2.0, limit: int = 20) -> str:
     """
-    Show all connections for a specific capture (tag overlap and @-references).
+    Show connections for a capture: @-references first (deliberate
+    assertions, both directions), then tag overlap ranked by IDF-weighted
+    strength — shared rare tags count for much more than shared common ones.
 
     Args:
-        capture_id: The numeric ID returned by upload_capture or search_captures.
+        capture_id:   The numeric ID returned by upload_capture or search_captures.
+        min_strength: Minimum strength for tag-overlap edges (default 2.0 ≈
+                      two ordinary shared tags or one rare one). References
+                      are always shown. Lower it to see weaker links.
+        limit:        Maximum connections listed (default 20). The total is
+                      always reported.
     """
     with _db() as con:
         capture = get_capture(con, capture_id)
         if capture is None:
             return f"Capture #{capture_id} not found."
-        connections = get_connections(con, capture_id)
+        vols, scope_note = _read_scope(con)
+        connections = get_connections(con, capture_id, volumes=vols)
 
+    label = capture["template_id"] or "UNIDENTIFIED"
     if not connections:
         return (
-            f"No connections found for {capture['template_id']} (#{capture_id}).\n"
-            "Upload more captures to discover relationships."
+            f"No connections found for {label} (#{capture_id}).\n"
+            "Upload more captures to discover relationships." + scope_note
         )
 
-    lines = [f"Connections for {capture['template_id']} (#{capture_id}):\n"]
-    for c in connections:
-        method_label = c["method"].replace("_", " ")
+    refs     = [c for c in connections if c["type"] == "reference"]
+    overlaps = [c for c in connections if c["type"] != "reference"]
+    strong   = [c for c in overlaps if c["strength"] >= min_strength]
+    shown    = (refs + strong)[:limit]
+    hidden_weak = len(overlaps) - len(strong)
+
+    direction_labels = {
+        "cites":    "→ cites",
+        "cited_by": "← cited by",
+        "shared":   "↔ shares tags with",
+    }
+
+    lines = [
+        f"Connections for {label} (#{capture_id}) — "
+        f"showing {len(shown)} of {len(connections)} total:\n"
+    ]
+    for c in shown:
+        dir_label = direction_labels.get(c.get("direction", "shared"), "↔")
+        vol_str = f" (vol {c['connected_volume']})" if c.get("connected_volume", 1) != 1 else ""
         lines.append(
-            f"  → {c['connected_template']}  [{method_label}]  strength={c['strength']:.0f}\n"
+            f"  {dir_label} {c['connected_template'] or 'UNIDENTIFIED'}{vol_str}"
+            f"  [{c['method'].replace('_', ' ')}]  strength={c['strength']:.1f}\n"
             f"    {c['connected_summary'] or '(no summary)'}"
         )
-    return "\n".join(lines)
+    if hidden_weak > 0:
+        lines.append(
+            f"\n  … {hidden_weak} weaker tag-overlap connection(s) below "
+            f"strength {min_strength:.1f} — pass min_strength=0 to see all."
+        )
+    return "\n".join(lines) + scope_note
 
 
 # ── Tool: get_stats ───────────────────────────────────────────────────────────
@@ -733,10 +1088,11 @@ def get_stats() -> str:
     open questions, key insights, and date range.
     """
     with _db() as con:
-        stats = db_get_stats(con)
+        vols, scope_note = _read_scope(con)
+        stats = db_get_stats(con, volumes=vols)
 
     if stats["total_captures"] == 0:
-        return "Your knowledge base is empty. Upload a journal photo to get started."
+        return "Your knowledge base is empty. Upload a journal photo to get started." + scope_note
 
     by_type = stats["by_type"]
     type_lines = "\n".join(
@@ -763,6 +1119,7 @@ def get_stats() -> str:
         f"Key insights  ($)   : {stats['key_insights']}\n\n"
         f"Top tags:\n{top_tags or '  (none yet)'}\n\n"
         f"Date range: {date_str}"
+        + scope_note
     )
 
 
@@ -954,8 +1311,11 @@ def journal_health() -> str:
       - Insight velocity ($ insights/week)
       - Days since last Review entry
       - Unanswered open questions and their age
-      - Synthesis ratio (RC entries per SYN page — target ~4:1)
+      - Synthesis activity (digitized SYN pages — descriptive only)
       - Template balance (which template types are unused)
+
+    All KPIs count hand-written journal captures only; AI-extracted (AIEX)
+    entries are excluded so they don't inflate your practice metrics.
 
     Returns a health score and specific, actionable recommendations.
     """
@@ -969,30 +1329,13 @@ def journal_health() -> str:
     recommendations = []
     score_penalties  = 0
 
-    # ── Synthesis ratio check ──────────────────────────────────────────
+    # ── Synthesis activity (descriptive, NOT scored) ───────────────────
+    # Physical SYN pages are a deliberate analog practice and often never
+    # reach the digital base, so the digitized RC:SYN ratio cannot measure
+    # the actual practice. Report it without scoring against a target.
     ratio = kpis["synthesis_ratio"]
     rc    = by_type.get("RC", 0)
     syn   = by_type.get("SYN", 0)
-    if ratio is None and rc >= 4:
-        recommendations.append(
-            "★ You have RC entries but no SYN pages yet. "
-            f"With {rc} rapid captures, you're ready to synthesize. "
-            "Open SYN-001 and look for patterns."
-        )
-        score_penalties += 2
-    elif ratio and ratio > 8:
-        recommendations.append(
-            f"★ Synthesis backlog: {rc} RC entries for only {syn} SYN page(s) "
-            f"({ratio:.0f}:1 ratio, target ~4:1). "
-            "Time to connect some dots — run suggest_synthesis to see what's ready."
-        )
-        score_penalties += 2
-    elif ratio and ratio > 4:
-        recommendations.append(
-            f"↻ Synthesis ratio is {ratio:.1f}:1 (target ~4:1). "
-            "Consider opening a SYN page soon."
-        )
-        score_penalties += 1
 
     # ── Review cadence ─────────────────────────────────────────────────
     days_rev = kpis["days_since_last_rev"]
@@ -1054,7 +1397,7 @@ def journal_health() -> str:
     ratio_str = f"{ratio:.1f}:1" if ratio is not None else f"{rc} RC / 0 SYN"
 
     lines = [
-        "Journal Health\n" + "─" * 40,
+        "Journal Health  (hand-written captures only)\n" + "─" * 40,
         f"  Health score : {score_bar}  {score}/{max_score}",
         "",
         "KPIs (last 4 weeks):",
@@ -1062,7 +1405,8 @@ def journal_health() -> str:
         f"  Insight velocity  : {ins:.1f} / week",
         f"  Last Review       : {rev_str}",
         f"  Open questions    : {unanswered}",
-        f"  Synthesis ratio   : {ratio_str}  (target ~4:1)",
+        f"  Digitized RC:SYN  : {ratio_str}  (descriptive only — physical SYN"
+        f" pages worked on paper don't reach this count)",
         "",
         "Captures by type:",
     ] + [
@@ -1083,7 +1427,7 @@ def journal_health() -> str:
 # ── Tool: list_by_tag ─────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_by_tag(tag: str, prefix: str = "") -> str:
+def list_by_tag(tag: str, prefix: str = "", role: str = "") -> str:
     """
     Browse all captures that carry a specific tag — no text query required.
 
@@ -1092,33 +1436,61 @@ def list_by_tag(tag: str, prefix: str = "") -> str:
       list_by_tag("machine-learning", prefix="#") → only # topic tags
       list_by_tag("RC-012", prefix="@")          → captures referencing @RC-012
       list_by_tag("deadline", prefix="!")        → priority items
-      list_by_tag("attention-mechanism", prefix="?") → that open question
+      list_by_tag("falling", role="motif")       → DC recurring motifs only
+
+    The same prefix character means different things on Dream Capture pages
+    (# theme, @ symbol, ! motif) than on RC/SYN/REV (# topic, @ reference,
+    ! priority). Use *role* to select by meaning rather than character:
+    topic, theme, reference, entity, priority, motif, question, insight,
+    causal, sensory.
 
     Args:
         tag:    Tag value to look up (without the prefix character).
-        prefix: Optional prefix to narrow the search: #  @  !  ?  $  ->
-                Leave blank to match the tag across all prefix types.
+        prefix: Optional prefix character: #  @  !  ?  $  *  ->
+        role:   Optional semantic role — the precise way to disambiguate
+                DC vs RC/SYN/REV meanings.
     """
     if not tag.strip():
         return "Please provide a tag value to look up."
 
     with _db() as con:
-        results = get_captures_by_tag(con, tag.strip(), prefix=prefix.strip())
+        vols, scope_note = _read_scope(con)
+        results = get_captures_by_tag(
+            con, tag.strip(), prefix=prefix.strip(), role=role.strip(), volumes=vols
+        )
 
     if not results:
         pfx_str = f"{prefix}{tag}" if prefix else tag
-        return f"No captures found with tag: {pfx_str!r}"
+        role_str = f" (role={role})" if role else ""
+        return f"No captures found with tag: {pfx_str!r}{role_str}" + scope_note
+
+    # When a colliding prefix is queried without a role, report the split
+    # rather than silently merging different meanings into one list (§1.10).
+    role_counts: dict[str, int] = {}
+    for r in results:
+        role_counts[r.get("matched_role") or "untyped"] = \
+            role_counts.get(r.get("matched_role") or "untyped", 0) + 1
 
     pfx_label = f"{prefix}{tag}" if prefix else tag
-    lines = [f"Captures tagged {pfx_label!r}  ({len(results)} found):\n"]
+    lines = [f"Captures tagged {pfx_label!r}  ({len(results)} found):"]
+    if not role and len(role_counts) > 1:
+        split = ", ".join(f"{n} as {r}" for r, n in sorted(role_counts.items()))
+        lines.append(
+            f"  Note: this tag carries {len(role_counts)} different meanings here — {split}. "
+            f"Pass role=... to narrow."
+        )
+    lines.append("")
     for r in results:
         tag_str = " ".join(f"{t['prefix']}{t['value']}" for t in r.get("tags", [])[:5])
+        role_note = f"  ({r['matched_role']})" if r.get("matched_role") else ""
+        vol_str = f" vol {r['volume']}" if r.get("volume", 1) != 1 else ""
         lines.append(
-            f"  [{r['template_id']}] #{r['id']}  {r['created_at'][:10]}\n"
+            f"  [{r['template_id'] or 'UNIDENTIFIED'}]{vol_str} #{r['id']}  "
+            f"{r['created_at'][:10]}{role_note}\n"
             f"    {r['summary'] or '(no summary)'}\n"
             f"    Tags: {tag_str or 'none'}\n"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + scope_note
 
 
 # ── Tool: get_breakthroughs ───────────────────────────────────────────────────

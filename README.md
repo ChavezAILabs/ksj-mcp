@@ -208,7 +208,11 @@ Once connected, talk to your AI assistant naturally.
 | `manual_capture` | Store a page your assistant transcribed with vision — the primary capture path |
 | `upload_capture` | OCR a journal photo locally (Tesseract), parse the template, store it, highlight strongest connection |
 | `correct_ocr` | Replace a stored capture's text with a corrected transcription — re-parses tags and connections, preserves the original |
+| `identify_capture` | Assign or fix a capture's template ID — pages with unreadable IDs are stored, never discarded |
 | `bulk_upload` | Process a whole folder of photos at once (local OCR) |
+| `set_volume` | Multiple journals: set which book new captures go into and which books search sees |
+| `assert_entity` | Link a named entity (person, place, work, dream symbol) to a capture |
+| `rebuild_connections` | Re-derive the whole connection graph from current tags and text |
 | `search_captures` | Full-text search with optional tag and date filters |
 | `list_by_tag` | Browse all captures with a given tag or prefix |
 | `find_connections` | Show tag-overlap and `@`-reference connections for a capture |
@@ -254,6 +258,36 @@ Use these prefixes anywhere on your journal pages — the server extracts them a
 | `!` | Recurring motif | `!falling` |
 | `*` | Sensory detail | `*cold-wind` |
 
+Three things the server does with these automatically:
+
+- **Roles.** The same character means different things on DC pages than on
+  RC/SYN/REV (`!` is priority on RC, a recurring motif on DC). The server
+  stores the *meaning* alongside the character, so browsing by tag can
+  distinguish them — ask for "priority items" vs "dream motifs".
+- **Entities.** An `@` value that isn't a template ID (`@Veronica`,
+  `@the-old-house`) becomes a named entity — searchable across every capture
+  and every journal volume. Dream symbols and story characters are the same
+  kind of object.
+- **Tag bubbles.** Anything written inside the printed tag bubbles counts as
+  a tag, with or without the `#`. `DOG MAN`, `Dog-Man`, and `DOG-MAN` all
+  normalize to the same tag.
+
+## Multiple journals (volumes)
+
+Finished a journal and started a second one? The new book starts over at
+RC-001 — that's expected. Each physical journal is a **volume**, and volume 2
+continues volume 1's knowledge base: search spans all volumes and
+cross-volume connections are normal.
+
+When you start a new book, say so once:
+
+> "I'm starting my second journal" → the assistant runs `set_volume(current_volume=2)`
+
+Or write the volume on the page itself (e.g. `V2` next to the template ID),
+or pass `volume=2` on a single upload. If an upload collides with an existing
+page ID, the server asks whether it's a new journal or a re-capture — nothing
+is ever silently overwritten.
+
 ---
 
 ## Troubleshooting
@@ -261,8 +295,8 @@ Use these prefixes anywhere on your journal pages — the server extracts them a
 **"Tesseract OCR is not installed"**
 You called `upload_capture`/`bulk_upload`, which need the optional local OCR engine. Either install Tesseract ([Optional: offline OCR](#optional-offline-ocr-tesseract)) and restart your AI client — or skip it entirely: share the photo in chat and ask your assistant to read and store the page instead.
 
-**"Could not detect a template ID"**
-Make sure the template number (RC-001, SYN-001, etc.) is clearly visible in the photo. Try better lighting or a closer shot — or tell your assistant the ID directly ("this is RC-001") and it can pass `template_id` explicitly.
+**"Stored as UNIDENTIFIED"**
+The template ID couldn't be read from the photo, but the page and its text were stored anyway — nothing is lost. Tell your assistant the correct ID ("that's RC-007") and it will fix it with `identify_capture`. Sloppy or unpadded IDs (`RC-7`, `RC-OO2`, a stray letter after the number) are read automatically with a confirmation note.
 
 **OCR got the text wrong**
 Ask your assistant to fix it with `correct_ocr` — give it the capture number and the corrected text. The original read is preserved, and tags and connections are rebuilt from the correction.
@@ -294,7 +328,9 @@ All your captures are stored locally in `~/.ksj-mcp/`:
 ~/.ksj-mcp/images/         (copies of uploaded journal photos)
 ```
 
-Your data is never sent anywhere and persists across updates.
+Your data is never sent anywhere and persists across updates. Schema
+upgrades run automatically on server start; before the first 3.0 start your
+database is backed up to `captures.db.bak-v3` in the same folder.
 
 **Custom location:** Set the `KSJ_DATA_DIR` environment variable in your config to store data elsewhere:
 

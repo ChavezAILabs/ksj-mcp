@@ -17,30 +17,34 @@ from ksj_mcp.templates import (
 
 # ── extract_schema_tags ───────────────────────────────────────────────────────
 
+def _has_tag(tags, prefix, value):
+    return any(t["prefix"] == prefix and t["value"] == value for t in tags)
+
+
 class TestExtractSchemaTags:
     def test_hash_tag(self):
         tags = extract_schema_tags("Learning #machine-learning today")
-        assert {"prefix": "#", "value": "machine-learning"} in tags
+        assert _has_tag(tags, "#", "machine-learning")
 
     def test_at_tag(self):
         tags = extract_schema_tags("See also @RC-012 for context")
-        assert {"prefix": "@", "value": "rc-012"} in tags
+        assert _has_tag(tags, "@", "rc-012")
 
     def test_exclamation_tag(self):
         tags = extract_schema_tags("!urgent deadline approaching")
-        assert {"prefix": "!", "value": "urgent"} in tags
+        assert _has_tag(tags, "!", "urgent")
 
     def test_star_tag_dc_sensory(self):
         tags = extract_schema_tags("*cold-wind rushing past")
-        assert {"prefix": "*", "value": "cold-wind"} in tags
+        assert _has_tag(tags, "*", "cold-wind")
 
     def test_question_tag(self):
         tags = extract_schema_tags("?how-does-this-scale")
-        assert {"prefix": "?", "value": "how-does-this-scale"} in tags
+        assert _has_tag(tags, "?", "how-does-this-scale")
 
     def test_dollar_tag(self):
         tags = extract_schema_tags("$key-insight about attention")
-        assert {"prefix": "$", "value": "key-insight"} in tags
+        assert _has_tag(tags, "$", "key-insight")
 
     def test_arrow_tag_unicode(self):
         tags = extract_schema_tags("input→output transformation")
