@@ -395,6 +395,33 @@ def get_capture(con: sqlite3.Connection, capture_id: int) -> dict | None:
     return result
 
 
+def get_capture_by_template(
+    con: sqlite3.Connection, template_id: str, type_: str | None = None
+) -> dict | None:
+    """
+    Look up a single capture by its template ID (e.g. "SYN-004"), optionally
+    constrained to a type so a caller can't accidentally match the wrong
+    template family. Case-insensitive; most recent volume wins on collision.
+    """
+    sql = "SELECT * FROM captures WHERE template_id=? COLLATE NOCASE"
+    params: list[Any] = [template_id]
+    if type_:
+        sql += " AND type=?"
+        params.append(type_.upper())
+    row = con.execute(sql + " ORDER BY volume DESC LIMIT 1", params).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["content"] = json.loads(result.pop("content_json"))
+    result["tags"] = [
+        dict(t) for t in con.execute(
+            "SELECT prefix, value, display, role FROM tags WHERE capture_id=?",
+            (result["id"],),
+        ).fetchall()
+    ]
+    return result
+
+
 def list_captures(
     con: sqlite3.Connection,
     type_filter: str | None = None,

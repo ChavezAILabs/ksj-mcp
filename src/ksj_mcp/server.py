@@ -1,7 +1,7 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-28 tools:
+29 tools:
   export_html        — Self-contained HTML view: timeline, index, connections, graph
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
@@ -23,6 +23,7 @@ KSJ MCP Server — FastMCP entry point.
   get_stats          — Summary counts, top tags, open questions
   export_captures    — Dump captures as Markdown or JSON
   suggest_synthesis  — Find RC clusters ready for a SYN entry
+  surface_connections— Independent scan of a SYN page's RC cluster + comparison dialogue (Phase 1/2; no DB write yet)
   export_study_deck  — Export ? questions as a portable study deck CSV
   journal_health     — KPI dashboard + coaching recommendations
   get_breakthroughs  — All SYN entries chronologically with insights
@@ -35,7 +36,7 @@ KSJ MCP Server — FastMCP entry point.
 import json
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -44,6 +45,7 @@ from .database import (
     check_duplicate,
     get_active_volumes,
     get_capture,
+    get_capture_by_template,
     get_captures_by_tag,
     get_captures_for_entity,
     get_connections,
@@ -1706,6 +1708,269 @@ def suggest_synthesis(min_captures: int = 3) -> str:
             )
 
     return "\n".join(lines)
+
+
+# ── Tool: surface_connections ─────────────────────────────────────────────────
+
+@mcp.tool()
+def surface_connections(
+    syn_template_id: str,
+    entry_ids: str = "",
+    days: int = 0,
+    depth: str = "standard",
+) -> str:
+    """
+    Independently scan the Rapid Capture cluster behind a Synthesis page you
+    have ALREADY written and photographed, then prepare a structured
+    dialogue comparing what the scan found against what the page found.
+
+    This runs AFTER a SYN page exists for the cluster — never before.
+    Running it before the page is written would let the AI perform the
+    cognitive act synthesis is meant to force (see
+    ksj2_documents/SYN_companion_decision_optionB_2026-08-03.md). There is
+    no override flag for this precondition — if no SYN page is found, the
+    tool declines and points to suggest_synthesis() instead.
+
+    The scan itself never reads the SYN page's own content before producing
+    its connection map, so the Phase 2 comparison is meaningful rather than
+    confirmatory. This tool does NOT write to the database — it prepares
+    the scan data and dialogue instructions for Claude to run in this
+    conversation. `commit_distillation()`, which will persist the outcome,
+    is not implemented yet — do not attempt to call it.
+
+    Trigger phrases: "Run surface_connections on SYN-004", "Compare my
+    synthesis against an independent scan".
+
+    Args:
+        syn_template_id: The SYN page's template ID (e.g. "SYN-004").
+                         Required — the tool declines if no SYN page with
+                         this ID exists.
+        entry_ids:       Optional comma-separated RC template IDs (e.g.
+                         "RC-001,RC-047,RC-083") to scan explicitly.
+                         Required when the SYN page's RC cluster can't be
+                         resolved automatically — no matching tag cluster,
+                         or more than one candidate cluster.
+        days:            Optional — narrow the resolved cluster to RC
+                         entries created in the last N days. 0 = no filter.
+        depth:           "brief" | "standard" (default) | "deep" — how many
+                         follow-up questions per tier to plan for in the
+                         dialogue. The user can also say "more on this one"
+                         for any single connection regardless of depth.
+
+    Returns the RC cluster data, gap candidates, and full scan + dialogue
+    instructions for Claude to execute.
+    """
+    syn_template_id = syn_template_id.strip().upper()
+    if not syn_template_id:
+        return 'Please provide the SYN page\'s template ID, e.g. surface_connections(syn_template_id="SYN-004").'
+
+    depth = depth.strip().lower()
+    if depth not in ("brief", "standard", "deep"):
+        depth = "standard"
+
+    with _db() as con:
+        syn_cap = get_capture_by_template(con, syn_template_id, type_="SYN")
+        if syn_cap is None:
+            return (
+                f"No Synthesis page found for {syn_template_id}.\n\n"
+                "surface_connections compares an independent scan against synthesis "
+                "you've already done — it runs after the SYN page, not before. "
+                "suggest_synthesis() shows which clusters are ready to write."
+            )
+
+        # §5.3: resolve the RC cluster. Explicit entry_ids always win when given.
+        explicit_ids = [t.strip().upper() for t in entry_ids.split(",") if t.strip()]
+        rc_caps: list[dict] = []
+        cluster_tag = None
+
+        if explicit_ids:
+            missing = []
+            for tid in explicit_ids:
+                cap = get_capture_by_template(con, tid, type_="RC")
+                if cap is None:
+                    missing.append(tid)
+                else:
+                    rc_caps.append(cap)
+            if missing:
+                return f"No RC capture found for: {', '.join(missing)}. Check the template IDs and try again."
+        else:
+            # Chain 1: consume suggest_synthesis's own clustering, never
+            # reimplement it. min_size=1 here because we're matching an
+            # EXISTING SYN page's tag, not gating readiness-to-write.
+            clusters = get_rc_tag_clusters(con, min_size=1)
+            matches = [c for c in clusters if syn_template_id in c["syn_templates"]]
+            if not matches:
+                return (
+                    f"{syn_template_id} doesn't share a #tag with any current RC "
+                    "cluster, so its cluster can't be resolved automatically. Call "
+                    "surface_connections again with entry_ids naming the RC pages "
+                    f"{syn_template_id} synthesizes."
+                )
+            if len(matches) > 1:
+                tag_list = ", ".join(f"#{m['tag']} ({m['rc_count']} RC)" for m in matches)
+                return (
+                    f"{syn_template_id} matches more than one RC cluster: {tag_list}. "
+                    "surface_connections needs an unambiguous cluster — call it again "
+                    "with entry_ids naming the specific RC pages to scan."
+                )
+            cluster = matches[0]
+            cluster_tag = cluster["tag"]
+            for tid in cluster["rc_templates"]:
+                cap = get_capture_by_template(con, tid, type_="RC")
+                if cap:
+                    rc_caps.append(cap)
+
+        if days > 0:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            rc_caps = [c for c in rc_caps if c["created_at"] >= cutoff]
+
+        if len(rc_caps) < 2:
+            scope = "via entry_ids" if explicit_ids else f"tag #{cluster_tag}"
+            window = f", last {days} days" if days > 0 else ""
+            return (
+                f"Only {len(rc_caps)} RC entry in scope after resolving the cluster "
+                f"({scope}{window}) — surface_connections needs at least two to "
+                "compare. Widen entry_ids or drop the days filter."
+            )
+
+        # §5.2: warn (don't block) if the SYN page's own transcription is
+        # both uncorrected and low-confidence — Phase 2 compares against it,
+        # and a bad transcription would produce false MISSED entries.
+        ocr_warning = ""
+        if not syn_cap.get("corrected_ocr") and syn_cap.get("confidence", 1.0) < 0.6:
+            ocr_warning = (
+                f"\n⚠ {syn_template_id}'s transcription is uncorrected and "
+                f"low-confidence ({syn_cap.get('confidence', 0.0):.0%}). Consider "
+                "correct_ocr() first — Phase 2's comparison reads this text, and a "
+                "bad transcription can produce MISSED entries that are really just "
+                "OCR errors.\n"
+            )
+
+        # Chain 2: find_unapplied composed across the cluster, deduped by the
+        # uncited capture it names. No new gap logic — reuses the shipped
+        # propagation-failure check as-is.
+        gap_candidates: dict[int, dict] = {}
+        for cap in rc_caps:
+            for u in find_unapplied(con, cap["id"], limit=5):
+                gap_candidates.setdefault(u["id"], u)
+
+        rc_lines = []
+        for cap in rc_caps:
+            text = (cap.get("corrected_ocr") or cap["raw_ocr"] or "").strip()
+            tag_str = " ".join(
+                f"{t['prefix']}{t['display'] or t['value']}" for t in cap["tags"]
+            ) or "(no tags)"
+            rc_lines.append(
+                f"### {cap['template_id']}  ({cap['created_at'][:10]})\n"
+                f"Tags: {tag_str}\n{text}\n"
+            )
+
+        gap_lines = [
+            f"  - {g['template_id']} (uncited elsewhere) — shared: {', '.join(g['shared'])}\n"
+            f"    \"{(g['summary'] or '')[:100]}\""
+            for g in sorted(gap_candidates.values(), key=lambda g: -len(g["shared"]))
+        ]
+
+        cluster_desc = (
+            f"explicit entry_ids ({', '.join(c['template_id'] for c in rc_caps)})"
+            if explicit_ids else f"RC cluster #{cluster_tag}"
+        )
+        syn_text = (syn_cap.get("corrected_ocr") or syn_cap["raw_ocr"] or "").strip()
+
+    depth_guidance = {
+        "brief":    "Ask at most one question per tier unless the user asks for more.",
+        "standard": "Ask one to two questions per tier.",
+        "deep":     "Ask up to three or four questions per tier, and proactively "
+                    "check whether any single connection deserves more.",
+    }[depth]
+
+    return f"""## surface_connections — {syn_template_id}
+Cluster: {cluster_desc} · {len(rc_caps)} RC entries{ocr_warning}
+
+---
+
+## PART A — RC cluster (blind scan input)
+
+{chr(10).join(rc_lines)}
+
+### Gap candidates (find_unapplied, composed across the cluster)
+{chr(10).join(gap_lines) if gap_lines else "  (none found)"}
+
+---
+
+## PHASE 1 INSTRUCTIONS — do this before reading Part B below
+
+Using ONLY the RC entries in Part A above — do not read Part B yet — produce
+an independent connection map. Look for shared tags, recurring terms, echoed
+action items, and unanswered questions across these entries. Score each
+candidate connection:
+
+  🟢 Strong     — multiple corroborating signals (tag overlap, explicit cross-refs)
+  🟡 Developing — partial signal, plausible but unverified
+  🔴 Seed       — a single weak signal, human-judgment-only
+
+Print this once, above the map, verbatim:
+> Tiers describe connection strength between entries — not the strength of
+> the evidence within them.
+
+Present this as the Phase 1 connection map before continuing to Part B.
+
+---
+
+## PART B — {syn_template_id} (for Phase 2 comparison only)
+
+Date: {syn_cap['created_at'][:10]}
+{syn_text}
+
+---
+
+## PHASE 2 INSTRUCTIONS — structured dialogue
+
+Compare your Phase 1 map against what {syn_template_id} actually captured.
+Conduct a dialogue with the user, one question at a time, in this order:
+Green → Yellow → Red → Gaps (the gap candidates above, plus anything
+{syn_template_id} shares a topic with but never explicitly cross-references).
+
+Question forms — do not mix these up:
+  🟢 Green  — OPEN:          "What, if anything, connects these?"
+  🟡 Yellow — FORCED CHOICE: offer two concrete framings, ask which fits (or neither)
+  🔴 Red    — BINARY:        "Genuine signal, or retire it?"
+  Gaps      — OPEN:          ask what neither the scan nor the page addressed
+
+Depth: {depth}. {depth_guidance} At any point the user can say "more on this
+one" for a follow-up on a specific connection, regardless of depth.
+
+STANDING RULE — ask, never propose: a question makes the user think; a
+proposed interpretation to accept or reject makes you think, in their place.
+Restate this rule to yourself before EVERY question, not just once at the
+top — the drift toward proposing gets easier to fall into as a dialogue goes
+on. Do not ask more than 3 consecutive follow-up questions on the same
+connection — past that point it has become a negotiation over your reading
+of it, not the user's.
+
+The dialogue ends when the user says "done" or all questions are answered.
+
+---
+
+## OUTPUT — after the dialogue
+
+Produce a revised connection map with FOUR categories:
+
+  CONFIRMED (user agreed it's real)
+  RETIRED   (user rejected it)
+  DEFERRED  (user wants to revisit later)
+  MISSED    (found by your scan, absent from {syn_template_id})
+
+...and its mirror, which matters just as much:
+
+  BEYOND THE SCAN (on {syn_template_id}, not derivable from tags/text — came
+  from the user, not from any signal you could have found)
+
+The distillation — what the comparison revealed, not the connection list or
+the dialogue transcript — is the artifact worth keeping. `commit_distillation()`
+is not implemented yet, so do not attempt to call it: present the revised
+map and the distillation to the user directly, and note it's ready to be
+stored once that tool ships."""
 
 
 # ── Tool: export_study_deck ───────────────────────────────────────────────────

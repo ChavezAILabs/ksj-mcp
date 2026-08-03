@@ -266,6 +266,7 @@ Once connected, talk to your AI assistant naturally.
 | `get_stats` | Overview: counts, top tags, open questions, insights, date range |
 | `export_captures` | Dump your knowledge base as Markdown or JSON |
 | `suggest_synthesis` | Find RC topic clusters ready to become a SYN entry |
+| `surface_connections` | Independently scan the RC cluster behind a SYN page you've already written, then run a structured comparison dialogue — runs after the page exists, never before; no DB write yet (`commit_distillation` not implemented) |
 | `export_study_deck` | Export `?` questions as a portable CSV study deck (Anki, Quizlet, Notion, etc.) |
 | `journal_health` | KPI dashboard + coaching: velocity, synthesis ratio, review cadence, open questions |
 | `get_breakthroughs` | All SYN entries chronologically — your complete breakthrough timeline |
