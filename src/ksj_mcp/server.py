@@ -65,7 +65,14 @@ from .database import (
     get_connection,
 )
 from .connections import build_connections, rebuild_connections as db_rebuild_connections
-from .ocr import OcrNotAvailableError, detect_template_type, extract_text, parse_template_id
+from .ocr import (
+    CloudOcrConfigError,
+    OcrNotAvailableError,
+    active_backend,
+    detect_template_type,
+    extract_text,
+    parse_template_id,
+)
 from .templates import parse_template
 
 # ── Server init ───────────────────────────────────────────────────────────────
@@ -195,6 +202,22 @@ def _db():
     return get_connection(_DB_PATH)
 
 
+def _cloud_ocr_notice() -> str:
+    """
+    Consent line prepended to OCR-tool output whenever a cloud backend is
+    active — the user must always see, in the tool result itself, that their
+    images are leaving the machine and where they are going.
+    """
+    backend = active_backend()
+    if backend == "tesseract":
+        return ""
+    return (
+        f"⚠ Cloud OCR is ON (KSJ_OCR_BACKEND={backend}): each image is sent to "
+        f"your own {backend} endpoint for text extraction. Unset KSJ_OCR_BACKEND "
+        f"for fully local processing.\n\n"
+    )
+
+
 def _read_scope(con) -> tuple[list[int] | None, str]:
     """
     Active read scope: (volumes, note). volumes is None when all volumes are
@@ -253,6 +276,9 @@ def _process_image(image_path: str, force: bool = False, volume: int = 0) -> dic
         ocr_result = extract_text(image_path)
     except OcrNotAvailableError as e:
         result["error"] = f"OCR Error:\n\n{e}"
+        return result
+    except CloudOcrConfigError as e:
+        result["error"] = f"Cloud OCR configuration error:\n\n{e}"
         return result
     except FileNotFoundError:
         result["error"] = f"File not found: {image_path}"
@@ -473,7 +499,7 @@ def upload_capture(image_path: str, force: bool = False, volume: int = 0) -> str
     connection detected.
     """
     result = _process_image(image_path, force=force, volume=volume)
-    return _format_upload_result(result, image_path)
+    return _cloud_ocr_notice() + _format_upload_result(result, image_path)
 
 
 # ── Tool: manual_capture ──────────────────────────────────────────────────────
@@ -895,9 +921,12 @@ def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
     Pages without a readable template ID are stored as UNIDENTIFIED rather
     than skipped. Pass volume=N when importing a second (or later) journal.
 
-    Note: this path uses local Tesseract OCR, which performs poorly on
-    cursive handwriting. For best results on handwritten pages, share photos
-    in chat and store them via manual_capture instead.
+    Note: by default this path uses local Tesseract OCR, which performs
+    poorly on cursive handwriting. For a handful of pages, share photos in
+    chat and store them via manual_capture instead. For large handwritten
+    imports, the user can enable cloud OCR with their own key
+    (KSJ_OCR_BACKEND=azure — see README); it is off by default and every
+    run states when it is active.
 
     Args:
         folder_path: Absolute path to the folder containing journal photos.
@@ -921,7 +950,10 @@ def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
         return f"No image files found in {folder_path}"
 
     ok_count = dupe_count = error_count = 0
-    lines = [f"Bulk upload — {len(images)} image(s) found in {folder_path}\n{'─' * 50}"]
+    lines = [
+        _cloud_ocr_notice()
+        + f"Bulk upload — {len(images)} image(s) found in {folder_path}\n{'─' * 50}"
+    ]
 
     for img in images:
         result = _process_image(str(img), force=force, volume=volume)

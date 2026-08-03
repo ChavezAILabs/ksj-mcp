@@ -49,11 +49,12 @@ Spend an hour going deep on a topic with an AI assistant and most of that thinki
 
 Each insight is confidence-scored (🟢 Seed / 🔴 Developing / 🟡 Strong) and shown to you for review before anything is written to the database. Approved entries are stored alongside your journal captures with full tag support, so AI-extracted insights surface in searches, connection graphs, and synthesis suggestions alongside your handwritten notes.
 
-**Your knowledge base is local.** Storage, search, and connections all live in
-a SQLite database on your machine — nothing is synced or hosted anywhere. When
-your AI assistant reads a journal photo with vision, that image is handled by
-your assistant's platform like any other chat attachment; if you want
-everything processed on-machine, the local Tesseract OCR path is available.
+**Local by default.** Storage, search, and connections all live in a SQLite
+database on your machine — nothing is synced or hosted anywhere. When your AI
+assistant reads a journal photo with vision, that image is handled by your
+assistant's platform like any other chat attachment; the local Tesseract OCR
+path keeps everything on-machine. Optional cloud OCR for bulk imports exists
+but is **off unless you explicitly enable it** with your own key.
 
 ---
 
@@ -149,6 +150,40 @@ performs poorly on cursive handwriting — printed or very neat text works best.
 After installing, restart your AI client so the updated PATH is picked up.
 
 > **Windows note:** If you skip "Add to PATH", the server will still auto-detect Tesseract at the default install location (`C:\Program Files\Tesseract-OCR\`).
+
+### Optional: cloud OCR for bulk imports
+
+**Off by default — nothing leaves your machine unless you turn this on.**
+
+Importing a whole folder of handwritten pages with `bulk_upload` is the one
+place local Tesseract really hurts: cursive comes out as noise, page after
+page. If you have a large backlog, you can point the server at your own
+**Azure Document Intelligence** resource (~9% word error rate on handwriting
+vs ~95% for Tesseract):
+
+```json
+{
+  "mcpServers": {
+    "ksj": {
+      "command": "ksj-mcp",
+      "env": {
+        "KSJ_OCR_BACKEND": "azure",
+        "KSJ_AZURE_ENDPOINT": "https://<your-resource>.cognitiveservices.azure.com",
+        "KSJ_AZURE_KEY": "<your-key>"
+      }
+    }
+  }
+}
+```
+
+What this means for your data: each uploaded image is sent to **your own**
+Azure resource (your subscription, your key, Azure's data terms) for text
+extraction. Nothing else is sent anywhere, and your knowledge base stays
+local either way. Every upload's output states plainly when cloud OCR is
+active. Remove `KSJ_OCR_BACKEND` to return to fully local processing.
+
+For a handful of pages, skip all of this — sharing the photo in chat and
+letting your assistant read it is free and just as accurate.
 
 ---
 

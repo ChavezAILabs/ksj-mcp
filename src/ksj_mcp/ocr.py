@@ -1,13 +1,28 @@
 """
 OCR layer for KSJ MCP server.
 
+Two backends, selected by the KSJ_OCR_BACKEND environment variable:
+
+  tesseract (default) — fully local, no data leaves the machine. Weak on
+      cursive handwriting; fine for printed text.
+  azure — Azure Document Intelligence (prebuilt-read), user-supplied
+      endpoint + key via KSJ_AZURE_ENDPOINT / KSJ_AZURE_KEY. Sends each
+      image to the user's own Azure resource. OFF unless explicitly
+      enabled; intended for bulk imports of handwritten pages, where
+      Tesseract output is unusable.
+
 Wraps pytesseract with a clear, actionable error when Tesseract is not installed.
-All public functions raise OcrNotAvailableError rather than letting a cryptic
-pytesseract error bubble up to Claude Desktop.
+All public functions raise OcrNotAvailableError / CloudOcrConfigError rather
+than letting a cryptic error bubble up to the MCP client.
 """
 
+import os
 import re
 from pathlib import Path
+
+
+class CloudOcrConfigError(RuntimeError):
+    """Raised when a cloud OCR backend is selected but misconfigured."""
 
 
 class OcrNotAvailableError(RuntimeError):
@@ -81,6 +96,96 @@ def _run_ocr(image_path: Path) -> tuple[str, float]:
     except Exception as e:
         # Surface unexpected errors clearly
         raise RuntimeError(f"OCR failed on {image_path}: {e}") from e
+
+
+# ── Cloud backend: Azure Document Intelligence (prebuilt-read) ────────────────
+
+_AZURE_API_VERSION = "2023-07-31"
+
+
+def active_backend() -> str:
+    """The OCR backend selected via KSJ_OCR_BACKEND (default: tesseract)."""
+    return os.environ.get("KSJ_OCR_BACKEND", "").strip().lower() or "tesseract"
+
+
+def _parse_azure_result(analyze_result: dict) -> tuple[str, float]:
+    """Extract (text, avg word confidence 0-1) from an analyzeResult body."""
+    text = analyze_result.get("content", "")
+    confs = [
+        w["confidence"]
+        for page in analyze_result.get("pages", [])
+        for w in page.get("words", [])
+        if isinstance(w.get("confidence"), (int, float))
+    ]
+    confidence = (sum(confs) / len(confs)) if confs else (0.9 if text else 0.0)
+    return text, confidence
+
+
+def _run_azure_ocr(image_path: Path) -> tuple[str, float]:
+    """
+    Run Azure Document Intelligence prebuilt-read on *image_path*.
+
+    Requires KSJ_AZURE_ENDPOINT and KSJ_AZURE_KEY. The image is sent to the
+    user's own Azure resource — nothing else leaves the machine.
+    """
+    endpoint = os.environ.get("KSJ_AZURE_ENDPOINT", "").strip().rstrip("/")
+    key      = os.environ.get("KSJ_AZURE_KEY", "").strip()
+    if not endpoint or not key:
+        raise CloudOcrConfigError(
+            "KSJ_OCR_BACKEND=azure requires two more environment variables:\n"
+            "  KSJ_AZURE_ENDPOINT  (e.g. https://<resource>.cognitiveservices.azure.com)\n"
+            "  KSJ_AZURE_KEY       (a key for that Document Intelligence resource)\n"
+            "Set them in the same env block as KSJ_OCR_BACKEND, or unset "
+            "KSJ_OCR_BACKEND to use local Tesseract."
+        )
+
+    import json as _json
+    import time
+    import urllib.error
+    import urllib.request
+
+    url = (f"{endpoint}/formrecognizer/documentModels/prebuilt-read:analyze"
+           f"?api-version={_AZURE_API_VERSION}")
+    req = urllib.request.Request(
+        url,
+        data=image_path.read_bytes(),
+        method="POST",
+        headers={
+            "Ocp-Apim-Subscription-Key": key,
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            op_url = resp.headers.get("Operation-Location")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"Azure OCR request rejected (HTTP {e.code}). Check KSJ_AZURE_ENDPOINT "
+            f"and KSJ_AZURE_KEY. Detail: {e.read().decode(errors='replace')[:300]}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Azure OCR unreachable: {e.reason}") from e
+
+    if not op_url:
+        raise RuntimeError("Azure OCR did not return an Operation-Location header.")
+
+    poll = urllib.request.Request(op_url, headers={"Ocp-Apim-Subscription-Key": key})
+    for _ in range(60):
+        time.sleep(1)
+        with urllib.request.urlopen(poll, timeout=60) as resp:
+            body = _json.loads(resp.read().decode())
+        status = body.get("status")
+        if status == "succeeded":
+            return _parse_azure_result(body.get("analyzeResult", {}))
+        if status == "failed":
+            raise RuntimeError(f"Azure OCR analysis failed: {body.get('error', body)}")
+    raise RuntimeError("Azure OCR timed out after 60s waiting for the analysis result.")
+
+
+_BACKENDS = {
+    "tesseract": _run_ocr,
+    "azure":     _run_azure_ocr,
+}
 
 
 # ── Template detection (tiered) ───────────────────────────────────────────────
@@ -201,7 +306,15 @@ def extract_text(image_path: str | Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Image not found: {path}")
 
-    raw_text, confidence = _run_ocr(path)
+    backend = active_backend()
+    runner = _BACKENDS.get(backend)
+    if runner is None:
+        raise CloudOcrConfigError(
+            f"Unknown KSJ_OCR_BACKEND {backend!r} — supported values: "
+            f"{', '.join(sorted(_BACKENDS))}. Unset it to use local Tesseract."
+        )
+
+    raw_text, confidence = runner(path)
     parsed = parse_template_id(raw_text)
 
     return {
