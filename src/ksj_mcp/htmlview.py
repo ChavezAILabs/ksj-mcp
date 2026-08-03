@@ -791,7 +791,12 @@ function onGraphStrengthChange() {
   buildGraphData(v);
   clearGraphSelection();
   renderGraphStructure();
-  graphAlphaTarget = 0.5;
+  // One-off boost only. graphAlphaTarget stays at its resting 0, so the
+  // decay formula in stepGraphSim pulls alpha back down and the loop
+  // terminates on its own — leaving alphaTarget elevated here (as an
+  // earlier version of this code did) meant the "alpha > 0.001 ||
+  // alphaTarget > 0" stop condition was never satisfied and the layout
+  // churned forever until Reset Layout happened to zero the target.
   kickGraphSim(0.5);
 }
 
@@ -824,32 +829,52 @@ function onNodePointerDown(ev, n) {
   ev.stopPropagation();
   dragNode = n; dragMoved = false;
   dragStart = svgPoint(ev);
-  n.fx = n.x; n.fy = n.y;
-  graphAlphaTarget = 0.4;
-  kickGraphSim(0.4);
   document.getElementById('graph-svg').setPointerCapture(ev.pointerId);
+  // Deliberately do NOT pin the node or kick the simulation here — that
+  // used to happen on every pointerdown, so a plain inspection click
+  // jostled the layout before we even knew whether it was a click or a
+  // drag. Both now happen only once real movement is detected, in
+  // onSvgPointerMove below.
 }
 function onSvgPointerMove(ev) {
   if (!dragNode) return;
   const p = svgPoint(ev);
-  if (Math.abs(p.x - dragStart.x) > 2 || Math.abs(p.y - dragStart.y) > 2) dragMoved = true;
-  dragNode.fx = p.x; dragNode.fy = p.y;
+  if (!dragMoved && (Math.abs(p.x - dragStart.x) > 2 || Math.abs(p.y - dragStart.y) > 2)) {
+    dragMoved = true;
+    dragNode.fx = dragNode.x; dragNode.fy = dragNode.y;
+    graphAlphaTarget = 0.4;
+    kickGraphSim(0.4);
+  }
+  if (dragMoved) { dragNode.fx = p.x; dragNode.fy = p.y; }
 }
 function onSvgPointerUp() {
   if (!dragNode) return;
-  graphAlphaTarget = 0;
-  if (!dragMoved) selectGraphNode(dragNode);
+  if (dragMoved) {
+    // Real drag: cool the simulation back down toward its resting alpha
+    // target of 0; the node stays pinned where it was dropped so the
+    // manual arrangement persists until Reset Layout.
+    graphAlphaTarget = 0;
+  } else {
+    // Plain click: pure selection, zero physics side effects.
+    selectGraphNode(dragNode);
+  }
   dragNode = null;
-}
-function onSvgBackgroundClick(ev) {
-  if (ev.target.id === 'graph-svg') clearGraphSelection();
 }
 
 function wireGraphInteraction() {
   const svg = document.getElementById('graph-svg');
+  // Background-click clearing is deliberately wired on 'pointerdown', not
+  // 'click'. A node's pointerdown calls stopPropagation(), so this handler
+  // only ever fires for pointerdowns that land on genuinely empty canvas.
+  // A 'click' listener looked equivalent but was not: setPointerCapture()
+  // during a node interaction (above) retargets the synthetic click event
+  // that follows pointerup to the svg element itself, so a 'click'-based
+  // check here would immediately clear the selection selectGraphNode()
+  // had just set on the very same interaction — the info panel would
+  // flash and disappear on every node click.
+  svg.addEventListener('pointerdown', clearGraphSelection);
   svg.addEventListener('pointermove', onSvgPointerMove);
   svg.addEventListener('pointerup', onSvgPointerUp);
-  svg.addEventListener('click', onSvgBackgroundClick);
 }
 
 function selectGraphNode(n) {
