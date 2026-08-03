@@ -749,13 +749,25 @@ function labelsVisible() { return graphForceLabels || graphNodes.length <= 40; }
 function computeGlobePositions(captures, degreeMap) {
   const ranked = [...captures].sort((a, b) => (degreeMap.get(b.id) || 0) - (degreeMap.get(a.id) || 0));
   const n = ranked.length;
-  const golden = Math.PI * (3 - Math.sqrt(5));
   const positions = new Map();
-  ranked.forEach((c, rank) => {
-    if (rank === 0) { positions.set(c.id, { lat: 0, lon: 0 }); return; }
-    const hemisphere = rank % 2 === 0 ? 1 : -1;
-    const band = Math.ceil(rank / 2) / Math.ceil(Math.max(n - 1, 1) / 2);
-    const lat = hemisphere * band * (Math.PI / 2) * 0.92;
+  if (!n) return positions;
+  positions.set(ranked[0].id, { lat: 0, lon: 0 }); // most-connected: exact equator center
+  if (n === 1) return positions;
+
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const m = n - 1; // remaining captures to spiral outward from the equator
+  ranked.slice(1).forEach((c, idx) => {
+    const rank = idx + 1; // 1..m
+    const hemisphere = rank % 2 === 1 ? 1 : -1;
+    // A SMOOTH (not discretized) progression from just-off-equator to
+    // near-pole as rank increases: t = rank/m grows continuously, so every
+    // rank gets a distinct latitude magnitude. The earlier version used
+    // Math.ceil(rank/2), which groups PAIRS of ranks onto the exact same
+    // latitude band (differing only by hemisphere) — a coarse
+    // approximation that visibly clustered nodes together at some viewing
+    // angles. The golden-angle longitude spiral is unchanged.
+    const t = rank / m;
+    const lat = hemisphere * t * (Math.PI / 2) * 0.94;
     const lon = golden * rank;
     positions.set(c.id, { lat, lon });
   });
@@ -930,6 +942,7 @@ function renderGraphStructure() {
       const text = svgEl('text', { class: 'node-label', x: n.r + 3, y: 3 });
       text.textContent = label(c);
       g.appendChild(text);
+      g._label = text;
     }
     g._node = n;
     g.addEventListener('pointerenter', () => showGraphTooltip(n));
@@ -978,6 +991,14 @@ function renderGraphPositions() {
     const scale = 0.5 + p.depth * 0.6;
     el.setAttribute('transform', `translate(${p.x},${p.y}) scale(${scale})`);
     el.style.opacity = String(0.3 + p.depth * 0.7);
+    // Only the near (front-facing) half of the sphere keeps its label
+    // visible each frame — with every node labeled all the time, several
+    // captures land close together on screen at some rotation angles and
+    // their text piles up illegibly. Hiding far-side labels roughly halves
+    // how many are shown at any moment and drops exactly the ones too
+    // small/faint to read anyway. "Always show labels" means always,
+    // including the far side, so it overrides this.
+    if (el._label) el._label.style.display = (graphForceLabels || p.depth > 0.5) ? '' : 'none';
     nodesG.appendChild(el);
   }
 
@@ -1226,13 +1247,19 @@ function showGraphPanel(n) {
 function hideGraphPanel() { document.getElementById('graph-panel').hidden = true; }
 
 function showGraphTooltip(n) {
-  if (labelsVisible()) return; // static labels already visible
+  const p = projectOnSphere({ lat: n.lat, lon: n.lon }, globeRotation, n.isDC ? dcRadius() : globeRadius);
+  // A static label is only actually legible for THIS node right now if
+  // labels are rendered at all AND (force-on, or it's currently far-side
+  // enough to have been hidden per the same rule renderGraphPositions
+  // uses) — checking only the blanket node-count gate would skip the
+  // tooltip for a node whose own label is invisible at this rotation,
+  // leaving it with no identification at all.
+  if (labelsVisible() && (graphForceLabels || p.depth > 0.5)) return;
   const tip = document.getElementById('graph-tooltip');
   tip.hidden = false;
   tip.textContent = label(n.cap);
   const svg = document.getElementById('graph-svg');
   const rect = svg.getBoundingClientRect();
-  const p = projectOnSphere({ lat: n.lat, lon: n.lon }, globeRotation, n.isDC ? dcRadius() : globeRadius);
   tip.style.left = (p.x * (rect.width / GRAPH_W)) + 'px';
   tip.style.top = (p.y * (rect.height / GRAPH_H)) + 'px';
 }
