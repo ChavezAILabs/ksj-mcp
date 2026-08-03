@@ -1,7 +1,7 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-30 tools:
+32 tools:
   export_html        — Self-contained HTML view: timeline, index, connections, graph
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
@@ -25,6 +25,8 @@ KSJ MCP Server — FastMCP entry point.
   suggest_synthesis  — Find RC clusters ready for a SYN entry
   surface_connections— Independent scan of a SYN page's RC cluster + comparison dialogue (Phase 1/2; no DB write)
   commit_distillation— Store a confirmed surface_connections dialogue outcome as an AIEX entry, linked to its SYN page
+  audit_knowledge_status— Check a REV page's claimed status against evidence (open questions, uncited insights); no DB write
+  commit_assessment  — Store a confirmed audit_knowledge_status dialogue outcome as an AIEX entry, linked to its REV page
   export_study_deck  — Export ? questions as a portable study deck CSV
   journal_health     — KPI dashboard + coaching recommendations
   get_breakthroughs  — All SYN entries chronologically with insights
@@ -64,6 +66,7 @@ from .database import (
     get_question_captures,
     get_rc_tag_clusters,
     get_rev_progress,
+    get_topic_evidence_gaps,
     get_stats as db_get_stats,
     get_syn_breakthroughs,
     init_db,
@@ -971,6 +974,9 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
                    target (a SYN page). Normally set automatically by
                    commit_distillation(); asserting it by hand is for
                    fixing or adding a link that tool didn't create.
+      assesses   — source (an AIEX assessment entry) audits target (a REV
+                   page)'s claimed knowledge status. Normally set
+                   automatically by commit_assessment().
 
     Automatic contradiction detection is deliberately not offered — it
     cannot be done reliably. Supersession is either asserted here by a
@@ -979,12 +985,12 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
 
     Args:
         source_id: The newer / asserting capture (numeric ID).
-        target_id: The capture being superseded / refuted / supported / distilled.
-        relation:  supersedes | refutes | narrows | supports | distills
+        target_id: The capture being superseded / refuted / supported / distilled / assessed.
+        relation:  supersedes | refutes | narrows | supports | distills | assesses
         note:      Optional one-line reason, stored on the edge.
     """
     relation = relation.strip().lower()
-    valid = {"supersedes", "refutes", "narrows", "supports", "distills"}
+    valid = {"supersedes", "refutes", "narrows", "supports", "distills", "assesses"}
     if relation not in valid:
         return f"Unknown relation {relation!r} — use one of: {', '.join(sorted(valid))}."
     if source_id == target_id:
@@ -2667,6 +2673,312 @@ def knowledge_progress(topic: str = "") -> str:
             f"{counts.get('Needs Work',0)} Needs Work"
         )
 
+    return "\n".join(lines)
+
+
+# ── Tool: audit_knowledge_status ──────────────────────────────────────────────
+
+@mcp.tool()
+def audit_knowledge_status(rev_template_id: str, depth: str = "standard") -> str:
+    """
+    Independently check a Review page's claimed Knowledge Status against
+    evidence in the journal, then prepare a dialogue over anything that
+    doesn't line up — e.g. a topic marked Mastered that still has open
+    questions attached to it.
+
+    This runs AFTER a REV page exists — never before; there's nothing to
+    audit until a status has actually been claimed. If no REV page is
+    found, the tool declines. This tool does NOT write to the database —
+    it prepares the audit and dialogue instructions for Claude to run in
+    this conversation. Call `commit_assessment()` after the user reviews
+    the outcome, to persist it. Never changes the REV page's own claimed
+    status — that stays physical-authority, exactly like
+    surface_connections never rewrites a SYN page.
+
+    A "Needs Work" claim isn't checked against evidence — it doesn't claim
+    completeness, so there's nothing to hold it to. Only Solid and
+    Mastered claims get audited.
+
+    Trigger phrases: "Audit REV-008", "Check my knowledge status claims
+    against the evidence".
+
+    Args:
+        rev_template_id: The REV page's template ID (e.g. "REV-008").
+                         Required — the tool declines if no REV page with
+                         this ID exists.
+        depth:           "brief" | "standard" (default) | "deep" — how many
+                         follow-up questions per flagged topic to plan for.
+                         The user can also say "more on this one" for any
+                         single topic regardless of depth.
+
+    Returns the claimed statuses, evidence findings per topic, and audit +
+    dialogue instructions for Claude to execute.
+    """
+    rev_template_id = rev_template_id.strip().upper()
+    if not rev_template_id:
+        return 'Please provide the REV page\'s template ID, e.g. audit_knowledge_status(rev_template_id="REV-008").'
+
+    depth = depth.strip().lower()
+    if depth not in ("brief", "standard", "deep"):
+        depth = "standard"
+
+    with _db() as con:
+        rev_cap = get_capture_by_template(con, rev_template_id, type_="REV")
+        if rev_cap is None:
+            return (
+                f"No Review page found for {rev_template_id}.\n\n"
+                "audit_knowledge_status checks a claimed status against evidence "
+                "already in the journal — it runs after the REV page, not before. "
+                "knowledge_progress() shows current topics and statuses."
+            )
+
+        status = (rev_cap.get("content") or {}).get("knowledge_status", "")
+        topics = sorted({t["value"] for t in rev_cap["tags"] if t["prefix"] == "#"})
+
+        if not topics:
+            return f"{rev_template_id} has no #topic tags — nothing to audit."
+        if not status:
+            return (
+                f"{rev_template_id} has no Knowledge Status recorded — nothing to audit. "
+                "If this was misread, correct_ocr() can fix the transcription."
+            )
+
+        ocr_warning = ""
+        if not rev_cap.get("corrected_ocr") and rev_cap.get("confidence", 1.0) < 0.6:
+            ocr_warning = (
+                f"\n⚠ {rev_template_id}'s transcription is uncorrected and "
+                f"low-confidence ({rev_cap.get('confidence', 0.0):.0%}). The status "
+                "and topic tags below may be misread — consider correct_ocr() first.\n"
+            )
+
+        topic_blocks = []
+        flagged_topics = []
+        for topic in topics:
+            history = get_rev_progress(con, topic_filter=topic)
+            seq = " → ".join(e["knowledge_status"] for e in history if e["knowledge_status"]) or "(no prior history)"
+
+            if status not in ("Solid", "Mastered"):
+                topic_blocks.append(
+                    f"### #{topic}\nPrior progression: {seq}\nClaimed: {status} "
+                    "(not auditable — a Needs Work claim doesn't assert completeness)\n"
+                )
+                continue
+
+            gaps = get_topic_evidence_gaps(con, topic)
+            oq, ui = gaps["open_questions"], gaps["uncited_insights"]
+            verdict = "FLAGGED" if (oq or ui) else "CONSISTENT"
+            if verdict == "FLAGGED":
+                flagged_topics.append(topic)
+
+            lines = [f"### #{topic}\nPrior progression: {seq}\nClaimed: {status}\nVerdict: {verdict}"]
+            if oq:
+                lines.append(f"Open questions ({len(oq)}):")
+                lines += [f"  - {q['template_id']}: {q['question']}" for q in oq]
+            if ui:
+                lines.append(f"Uncited insights ({len(ui)}):")
+                lines += [f"  - {i['template_id']}: {i['insight']}" for i in ui]
+            if verdict == "CONSISTENT":
+                lines.append("No open questions or uncited insights found on this topic.")
+            topic_blocks.append("\n".join(lines) + "\n")
+
+    depth_guidance = {
+        "brief":    "Ask at most one question per flagged topic unless the user asks for more.",
+        "standard": "Ask one to two questions per flagged topic.",
+        "deep":     "Ask up to three or four questions per flagged topic, and proactively "
+                    "check whether any single one deserves more.",
+    }[depth]
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    return f"""## audit_knowledge_status — {rev_template_id}
+Claimed status: {status} · Topics: {', '.join(f'#{t}' for t in topics)}{ocr_warning}
+
+---
+
+{chr(10).join(topic_blocks)}
+
+---
+
+## INSTRUCTIONS
+
+Present the topics above to the user, CONSISTENT ones briefly, FLAGGED ones
+in full (they're the ones with open questions or uncited insights standing
+against the claimed status).
+
+{f"For each FLAGGED topic ({', '.join(f'#{t}' for t in flagged_topics)}), conduct a dialogue, one question at a time. Ask, never propose — a question makes the user think; a proposed new status makes you think, in their place. Restate this to yourself before EVERY question. Do not ask more than 3 consecutive follow-up questions on the same topic." if flagged_topics else "No topics were flagged — nothing to dialogue about. Report the audit as clean."}
+
+Depth: {depth}. {depth_guidance} At any point the user can say "more on this
+one" for a follow-up on a specific topic, regardless of depth.
+
+The dialogue ends when the user says "done" or all flagged topics are covered.
+
+---
+
+## OUTPUT — after the dialogue (skip if nothing was flagged)
+
+Write a short assessment (2-5 sentences): what the audit found and what the
+user said about it. This does NOT change {rev_template_id}'s own claimed
+status — that stays physical-authority; a real status change belongs on a
+future hand-written REV page. The assessment records the reflection, not a
+verdict.
+
+Present it to the user, and only after they approve, call `commit_assessment()`:
+
+```json
+{{
+  "rev_template_id": "{rev_template_id}",
+  "date": "{today}",
+  "assessment": "<2-5 sentences: what the audit found and what came of the dialogue>",
+  "reaffirmed": ["<topic the user says the claim still holds for>"],
+  "revised": ["<topic + what the user now thinks, if their view shifted>"],
+  "tags": ["#topic1"]
+}}
+```
+
+No database write occurs until `commit_assessment()` is called with confirmed data."""
+
+
+# ── Tool: commit_assessment ───────────────────────────────────────────────────
+
+@mcp.tool()
+def commit_assessment(assessment_json: str) -> str:
+    """
+    Store the confirmed outcome of an audit_knowledge_status() dialogue.
+
+    Call this after the dialogue concludes and the user has reviewed the
+    assessment. Only the assessment — what the audit found and what came
+    of the dialogue, not a re-listing of every open question — is stored
+    as the entry's text.
+
+    Never changes the audited REV page's own claimed status — that stays
+    physical-authority, exactly like commit_distillation never rewrites a
+    SYN page. Stores with source='ai_extract' (excluded from journal_health
+    KPIs) using the AIEX sequence, and links to the REV page with an
+    asserted 'assesses' edge.
+
+    Args:
+        assessment_json: JSON string with fields:
+          rev_template_id (required) — the REV page this assesses.
+          assessment       (required) — 2-5 sentences: what the audit found
+                           and what came of the dialogue. This is the artifact.
+          reaffirmed, revised — lists of topic strings (both optional,
+                           default empty).
+          tags             — optional list of "#topic"/"@source"/etc strings.
+          date             — optional ISO date; defaults to today.
+
+    Returns a confirmation with the assigned AIEX ID and the assesses edge.
+    """
+    try:
+        data = json.loads(assessment_json)
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}\n\nMake sure to pass a valid JSON string."
+
+    rev_template_id = (data.get("rev_template_id") or "").strip().upper()
+    assessment      = (data.get("assessment") or "").strip()
+
+    if not rev_template_id:
+        return "assessment_json must include rev_template_id — the REV page this assesses."
+    if not assessment:
+        return (
+            "assessment_json must include a non-empty 'assessment' field — "
+            "what the audit found and what came of the dialogue, not a raw finding list."
+        )
+
+    date        = data.get("date") or datetime.now(timezone.utc).date().isoformat()
+    reaffirmed  = data.get("reaffirmed", [])
+    revised     = data.get("revised", [])
+    tag_strings = data.get("tags", [])
+
+    with _db() as con:
+        rev_cap = get_capture_by_template(con, rev_template_id, type_="REV")
+        if rev_cap is None:
+            return (
+                f"No Review page found for {rev_template_id} — commit_assessment "
+                "links to an existing REV page and never creates one. Check the template ID."
+            )
+
+        content = {
+            "assessment":      assessment,
+            "rev_template_id": rev_template_id,
+            "date":            date,
+            "reaffirmed":      reaffirmed,
+            "revised":         revised,
+        }
+
+        tags: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for tag_str in tag_strings:
+            tag_str = tag_str.strip()
+            if len(tag_str) < 2:
+                continue
+            if tag_str[0] in ('#', '@', '!', '?', '$', '*'):
+                prefix, raw_value = tag_str[0], tag_str[1:]
+            else:
+                prefix, raw_value = '#', tag_str
+            value = normalize_tag_value(raw_value)
+            if not value:
+                continue
+            key = (prefix, value)
+            if key not in seen:
+                seen.add(key)
+                tags.append({
+                    "prefix":  prefix,
+                    "value":   value,
+                    "display": raw_value,
+                    "role":    assign_role(prefix, value, "AIEX"),
+                })
+        for t in extract_schema_tags(assessment, "AIEX"):
+            key = (t["prefix"], t["value"])
+            if key not in seen:
+                seen.add(key)
+                tags.append(t)
+
+        aiex_id    = get_next_aiex_id(con)
+        capture_id = insert_capture(
+            con,
+            type_="AIEX",
+            template_id=aiex_id,
+            content=content,
+            raw_ocr=assessment,
+            summary=assessment[:200],
+            confidence=1.0,
+            image_path="",
+            source="ai_extract",
+        )
+        insert_tags(con, capture_id, tags)
+        con.commit()
+
+        connections = build_connections(con, capture_id)
+
+        # Same reasoning as commit_distillation's 'distills' edge:
+        # asserted_by='user' because the human approved this by confirming
+        # the dialogue's outcome, and rebuild_connections() deletes every
+        # edge WHERE asserted_by != 'user' with nothing to re-derive this
+        # one from tags/text.
+        insert_connection(
+            con, capture_id, rev_cap["id"], "asserted", 1.0, "asserted",
+            relation="assesses", asserted_by="user",
+        )
+        con.commit()
+
+    tag_str = ", ".join(f"{t['prefix']}{t['value']}" for t in tags) or "none"
+    lines = [
+        f"Assessment Commit — {aiex_id} (#{capture_id})\n{'─' * 40}",
+        f"  Assesses : {rev_template_id}",
+        f"  Date     : {date}",
+        f"  Tags     : {tag_str}",
+        f"\n{assessment}",
+        f"\nReaffirmed: {', '.join(reaffirmed) if reaffirmed else '(none)'}",
+        f"Revised   : {', '.join(revised) if revised else '(none)'}",
+    ]
+    if connections:
+        lines.append(f"\n{len(connections)} connection(s) detected on commit:")
+        for c in connections[:10]:
+            shared = f" (shared: {', '.join(c['shared_tags'])})" if c.get("shared_tags") else ""
+            lines.append(f"  → {c['connected_template']} [{c['method']}]{shared}")
+        if len(connections) > 10:
+            lines.append(f"  … and {len(connections) - 10} more")
+    lines.append(f"\nLinked to {rev_template_id} with an 'assesses' edge (asserted).")
+    lines.append("Stored as type=AIEX (AI-Extracted; excluded from journal_health KPIs).")
     return "\n".join(lines)
 
 

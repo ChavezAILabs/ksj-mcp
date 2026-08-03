@@ -534,7 +534,7 @@ const STRONG_OVERLAP = 2.0;
 const RELATION_PASSIVE = {
   supersedes: 'superseded by', refutes: 'refuted by',
   narrows: 'narrowed by', supports: 'supported by',
-  distills: 'distilled by',
+  distills: 'distilled by', assesses: 'assessed by',
 };
 
 function connectionRows(capId) {
@@ -873,7 +873,7 @@ function computeComponents(nodeIds, edges) {
 
 function summarizeGraph(nodes, links) {
   const counts = { reference: 0, entity_overlap: 0, tag_overlap: 0,
-    supersedes: 0, refutes: 0, narrows: 0, supports: 0, distills: 0 };
+    supersedes: 0, refutes: 0, narrows: 0, supports: 0, distills: 0, assesses: 0 };
   for (const l of links) {
     if (l.type === 'asserted') counts[l.relation] = (counts[l.relation] || 0) + 1;
     else counts[l.type] = (counts[l.type] || 0) + 1;
@@ -912,7 +912,7 @@ function graphSummaryHtml() {
   if (s.counts.reference) typeBits.push(plural(s.counts.reference, 'reference'));
   if (s.counts.entity_overlap) typeBits.push(plural(s.counts.entity_overlap, 'entity overlap'));
   if (s.counts.tag_overlap) typeBits.push(plural(s.counts.tag_overlap, 'tag overlap'));
-  const relBits = ['supersedes', 'refutes', 'narrows', 'supports', 'distills']
+  const relBits = ['supersedes', 'refutes', 'narrows', 'supports', 'distills', 'assesses']
     .filter(r => s.counts[r]).map(r => `${s.counts[r]} ${r}`);
   if (relBits.length) typeBits.push(`asserted (${relBits.join(', ')})`);
   if (typeBits.length) sentences.push(typeBits.join(' · ') + '.');

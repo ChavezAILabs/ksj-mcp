@@ -70,7 +70,7 @@ def init_db(db_path: Path | None = None) -> None:
                 type        TEXT NOT NULL,           -- tag_overlap | entity_overlap | reference | asserted
                 strength    REAL NOT NULL DEFAULT 1.0,
                 method      TEXT NOT NULL,
-                relation    TEXT,                    -- supersedes | refutes | narrows | supports | distills (asserted only)
+                relation    TEXT,                    -- supersedes | refutes | narrows | supports | distills | assesses (asserted only)
                 note        TEXT,                    -- optional human annotation
                 asserted_by TEXT NOT NULL DEFAULT 'derived'  -- 'derived' | 'user'
             );
@@ -906,6 +906,54 @@ def get_rev_progress(
             "created_at":       row["created_at"],
         })
     return results
+
+
+def get_topic_evidence_gaps(con: sqlite3.Connection, topic: str) -> dict:
+    """
+    Evidence against a claimed Solid/Mastered status on *topic*, for
+    audit_knowledge_status. Two signals, same "uncited" predicate shape
+    run_lint's stale_questions already uses (composed, not reimplemented):
+
+      open_questions   — captures tagged both #topic and an unresolved ?
+                          question (never connected to a $ insight)
+      uncited_insights — captures tagged both #topic and a $/! insight or
+                          priority that no reference edge ever points at
+                          (the same propagation-failure shape find_unapplied
+                          checks, scoped to this topic instead of one capture)
+
+    Neither has an age cutoff — a status claim being audited today needs to
+    hold up against evidence that exists today, not just old evidence.
+    """
+    open_questions = [dict(r) for r in con.execute(
+        """SELECT DISTINCT c.id, c.template_id, c.created_at, t.value AS question
+           FROM captures c
+           JOIN tags t ON t.capture_id = c.id AND t.prefix = '?'
+           WHERE c.valid_until IS NULL
+             AND EXISTS (SELECT 1 FROM tags tt WHERE tt.capture_id = c.id
+                         AND tt.prefix = '#' AND LOWER(tt.value) = LOWER(?))
+             AND NOT EXISTS (
+                 SELECT 1 FROM connections e
+                 JOIN tags t2 ON t2.prefix = '$' AND t2.capture_id =
+                     CASE WHEN e.source_id = c.id THEN e.target_id ELSE e.source_id END
+                 WHERE e.source_id = c.id OR e.target_id = c.id)
+           ORDER BY c.created_at""",
+        (topic,),
+    ).fetchall()]
+
+    uncited_insights = [dict(r) for r in con.execute(
+        """SELECT DISTINCT c.id, c.template_id, c.created_at, t.value AS insight
+           FROM captures c
+           JOIN tags t ON t.capture_id = c.id AND t.role IN ('insight', 'priority')
+           WHERE c.valid_until IS NULL
+             AND EXISTS (SELECT 1 FROM tags tt WHERE tt.capture_id = c.id
+                         AND tt.prefix = '#' AND LOWER(tt.value) = LOWER(?))
+             AND NOT EXISTS (SELECT 1 FROM connections e
+                             WHERE e.target_id = c.id AND e.type = 'reference')
+           ORDER BY c.created_at""",
+        (topic,),
+    ).fetchall()]
+
+    return {"open_questions": open_questions, "uncited_insights": uncited_insights}
 
 
 # ── Search ─────────────────────────────────────────────────────────────────────
