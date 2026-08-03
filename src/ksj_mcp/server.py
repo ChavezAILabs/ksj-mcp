@@ -1266,12 +1266,20 @@ def export_html(file_path: str = "") -> str:
       Graph       — a slowly rotating globe of the whole connection graph:
                     the most-connected capture sits dead center of the
                     equator, everything else spirals outward by connection
-                    rank. Drag to spin it, click a node to see its
-                    neighborhood and jump to it, adjust the strength slider
-                    to reveal or hide weaker tag/entity connections. A
-                    plain-language summary above the graph — including the
-                    time span of what's shown — describes what's currently
-                    visible (capture/connection counts, clusters, isolated
+                    rank. Dream Capture entries get their own smaller
+                    nested inner globe, with any connection reaching the
+                    main sphere shown as a distinct "rod". The spin is
+                    bounded (settles on its own, never perpetual) — Reset
+                    and every personalization toggle (globe size, show
+                    superseded, journal/AI source, auto-rotate, force
+                    labels) halt it immediately rather than letting it run
+                    on underneath a control you just touched. Drag to spin
+                    it manually, click a node to see its neighborhood and
+                    jump to it, adjust the strength slider to reveal or
+                    hide weaker tag/entity connections. A plain-language
+                    summary above the graph — including the time span of
+                    what's shown — describes what's currently visible
+                    (capture/connection counts, clusters, isolated
                     captures, most-connected capture) and updates live as
                     the threshold changes.
 

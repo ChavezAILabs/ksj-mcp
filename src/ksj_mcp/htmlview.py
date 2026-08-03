@@ -10,13 +10,19 @@ Overview modes ship in stages, gated only by the data each needs:
            (server 3.0/3.1) so it never renders a hairball. Each capture
            sits at a fixed point on a sphere — the most-connected capture
            dead center of the equator, the rest spiraling outward by
-           connection rank — and the sphere slowly auto-rotates; drag to
-           spin it manually, click a node to inspect it. Reset Layout
-           returns the view (not the data) to rotation 0 at the default
-           strength threshold — the sphere's shape itself never reshuffles.
-           A plain-language summary above the graph, including the time
-           span of what's shown, describes what's currently visible and
-           updates as the strength threshold changes.
+           connection rank. Dream Capture entries get their own smaller,
+           nested inner sphere; any connection reaching from a dream out to
+           the main sphere renders as a distinct "rod". The globe does one
+           bounded, decaying spin on first activation (never a perpetual
+           animation) and then rests; drag to spin it manually, click a
+           node to inspect it. Personalization controls (globe size, show
+           superseded, journal/AI source, auto-rotate on/off, force
+           labels) plus Reset Layout all live in the graph toolbar — Reset
+           returns every one of these to its default and snaps the view
+           (never the data) back to rotation 0, without replaying the
+           intro spin. A plain-language summary above the graph, including
+           the time span of what's shown, describes what's currently
+           visible and updates live with every control.
 
 One .html file, all data inlined as JSON, vanilla JS/CSS, no network access,
 no build step, opens in any browser. Everything user-authored is escaped
@@ -254,15 +260,25 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .line.e-asserted { background: var(--edge-negative); }
 .line.e-entity_overlap { background: var(--accent); opacity: .5; }
 .line.e-tag_overlap { background: var(--muted); opacity: .5; }
+.line.e-rod { background: var(--type-dc); }
 #view-graph { position: relative; }
 #graph-svg { width: 100%; height: 64vh; min-height: 360px; display: block;
   border: 1px solid var(--line); border-radius: 12px; background: var(--card); touch-action: none;
   cursor: grab; }
 #graph-svg:active { cursor: grabbing; }
+/* While an actual drag is in progress, force grabbing everywhere — without
+   this, passing over a node mid-drag would flicker the cursor to pointer
+   (its own rule) even though the user is mid-gesture, not about to click. */
+#graph-svg.dragging, #graph-svg.dragging * { cursor: grabbing !important; }
 .globe-outline { fill: none; stroke: var(--line); stroke-width: 1; opacity: .6; }
 .globe-equator { stroke: var(--accent); stroke-width: 1; opacity: .28; stroke-dasharray: 2 4; }
+.dc-globe-outline { fill: none; stroke: var(--type-dc); stroke-width: 1; opacity: .5; stroke-dasharray: 3 3; }
 .arrowhead { fill: var(--muted); }
-.node circle.body { stroke: var(--card); stroke-width: 1.5; cursor: pointer; }
+/* cursor lives on the whole node group, not just the circle, so hovering
+   any part of a node (including its label) reliably shows pointer instead
+   of occasionally falling through to the background's grab cursor. */
+.node { cursor: pointer; }
+.node circle.body { stroke: var(--card); stroke-width: 1.5; }
 .node.t-RC circle.body { fill: var(--type-rc); }
 .node.t-SYN circle.body { fill: var(--type-syn); }
 .node.t-REV circle.body { fill: var(--type-rev); }
@@ -286,6 +302,14 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .edge.e-asserted.e-rel-narrows { stroke: var(--muted); }
 .edge.e-entity_overlap { stroke: var(--accent); stroke-opacity: .45; stroke-width: 1.3; }
 .edge.e-tag_overlap { stroke: var(--muted); stroke-opacity: .3; stroke-width: 1; }
+/* A rod (a connection crossing from the inner DC/dream sphere out to the
+   main sphere) always gets the same solid strut look, regardless of the
+   underlying tag/reference/relation type it's also styled as — !important
+   because a same-specificity type/relation combo (e.g. .e-asserted.e-rel-
+   supports) would otherwise win on source order or out-specificity a plain
+   two-class .edge.e-rod rule. */
+.edge.e-rod { stroke: var(--type-dc) !important; stroke-width: 1.8 !important;
+  stroke-opacity: .55 !important; stroke-dasharray: none !important; }
 .edge.dimmed { stroke-opacity: .08 !important; }
 .graph-summary { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
   padding: 10px 14px; margin-bottom: 10px; font-size: .86rem; color: var(--ink); line-height: 1.6; }
@@ -331,6 +355,19 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
         oninput="onGraphStrengthChange()">
       <span id="gminstrength-val">3.5</span>
     </label>
+    <label>globe size
+      <input type="range" id="gsize" min="80" max="260" step="10" value="200"
+        oninput="onGlobeSizeChange()">
+      <span id="gsize-val">200</span>
+    </label>
+    <label><input type="checkbox" id="gshowsup" onchange="onGraphSupersededToggle()"> show superseded</label>
+    <select id="gsource" onchange="onGraphSourceChange()">
+      <option value="">Journal + AI</option>
+      <option value="journal">Journal only</option>
+      <option value="ai_extract">AI-extracted only</option>
+    </select>
+    <label><input type="checkbox" id="gautorotate" checked onchange="onGraphAutoRotateToggle()"> auto-rotate</label>
+    <label><input type="checkbox" id="gforcelabels" onchange="onGraphLabelsToggle()"> always show labels</label>
     <button class="btn" onclick="resetGraphLayout()">Reset layout</button>
     <div class="legend">
       <span><i class="dot t-RC"></i>RC</span>
@@ -343,6 +380,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
       <span><i class="line e-asserted"></i>asserted</span>
       <span><i class="line e-entity_overlap"></i>entity</span>
       <span><i class="line e-tag_overlap"></i>tag overlap</span>
+      <span><i class="line e-rod"></i>dream connection (rod)</span>
     </div>
   </div>
   <div class="activetag" id="activetag"></div>
@@ -361,6 +399,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
         </defs>
         <circle id="globe-outline" class="globe-outline" cx="450" cy="280" r="200"></circle>
         <line id="globe-equator" class="globe-equator" x1="250" y1="280" x2="650" y2="280"></line>
+        <circle id="dc-globe-outline" class="dc-globe-outline" cx="450" cy="280" r="70"></circle>
         <g id="graph-edges"></g>
         <g id="graph-nodes"></g>
       </svg>
@@ -396,11 +435,17 @@ function setMode(m) {
   render();
   if (m === 'graph') {
     // ensureGraphInit() only ever runs its body once (first activation) and
-    // stages its own delayed spin-start; a RETURN visit later just needs
-    // the rotation loop resumed immediately, with no re-staging.
+    // stages its own delayed spin-start. A RETURN visit later resumes the
+    // rotation loop ONLY if a spin was genuinely still in flight when the
+    // user left (spinVelocity above the stop threshold) — a settled,
+    // static globe should stay exactly as still as it was, not restart
+    // spinning just because the tab was revisited.
     const wasInitialized = graphInitialized;
     ensureGraphInit();
-    if (wasInitialized) ensureGlobeLoopRunning();
+    if (wasInitialized && !globeLoopRunning && Math.abs(spinVelocity) > SPIN_STOP_THRESHOLD) {
+      globeLoopRunning = true;
+      requestAnimationFrame(stepGlobe);
+    }
   }
 }
 
@@ -620,16 +665,27 @@ function render() {
   // innerHTML replacement here, that would blow away node positions.
 }
 
-// ---- mode 4: rotating globe ----
+// ---- mode 4: rotating globe, with a nested inner globe for dreams ----
 //
 // A small hand-written spherical projection (no CDN dependency — "opens in
 // any browser, no network" rules that out). Each capture sits at a FIXED
 // point on a sphere — the most-connected capture is placed dead center of
-// the equator, the rest spiral outward from there by connection rank — and
-// the sphere slowly auto-rotates. Weak tag-overlap edges are excluded by
-// default (adjustable via the strength slider), matching the server's own
-// traversal rule (connections.py _edge_map) — a graph where every capture
-// connects to hundreds of others is a hairball, not a graph.
+// the equator, the rest spiral outward from there by connection rank.
+// Dream Capture (DC) entries get their OWN smaller, concentric inner
+// sphere — dreams are a distinct, more personal category — and any
+// connection reaching from a DC capture out to the main sphere renders as
+// a visually distinct "rod" strut between the two nested globes.
+//
+// The globe does one bounded, decaying spin (like a coin settling, not a
+// perpetual motion machine) on first activation, then comes to rest.
+// Reset Layout, the strength slider, and every personalization toggle
+// below all explicitly halt any spin in progress rather than letting one
+// keep running underneath a control the user just touched.
+//
+// Weak tag-overlap edges are excluded by default (adjustable via the
+// strength slider), matching the server's own traversal rule
+// (connections.py _edge_map) — a graph where every capture connects to
+// hundreds of others is a hairball, not a graph.
 
 function filterGraphEdges(edges, minStrength) {
   return edges.filter(e => e.type !== 'tag_overlap' || e.strength >= minStrength);
@@ -645,17 +701,28 @@ function computeDegrees(nodeIds, edges) {
 }
 
 const GRAPH_W = 900, GRAPH_H = 560, GRAPH_CX = GRAPH_W / 2, GRAPH_CY = GRAPH_H / 2;
-const GLOBE_R = 200;
+const GLOBE_SIZE_DEFAULT = 200, GLOBE_SIZE_MIN = 80, GLOBE_SIZE_MAX = 260;
+const DC_GLOBE_RATIO = 0.35; // inner sphere radius, as a fraction of the outer one
 const GRAPH_DEFAULT_STRENGTH = 3.5;
-const GLOBE_SPIN_SPEED = 0.0035; // radians per frame — a slow, majestic turn
+const SPIN_INITIAL_VELOCITY = 0.05; // radians/frame at the start of the reveal spin
+const SPIN_DECAY = 0.985;           // multiplicative decay per frame — a graceful slow-down
+const SPIN_STOP_THRESHOLD = 0.00005;
+
 let graphInitialized = false;
 let graphNodes = [], graphSimLinks = [];
 let graphSelected = null;
 let currentMinStrength = GRAPH_DEFAULT_STRENGTH;
-let globePositions = new Map(); // capture id -> {lat, lon}, fixed once computed
+let globePositions = new Map();   // outer-sphere capture id -> {lat, lon}
+let dcGlobePositions = new Map(); // inner-sphere (DC) capture id -> {lat, lon}
 let globeRotation = 0;
+let globeRadius = GLOBE_SIZE_DEFAULT;
 let globeLoopRunning = false;
+let spinVelocity = 0;
 let dragActive = false, dragStartX = 0, dragMoved = false, dragStartRotation = 0, dragNodeHit = null;
+let graphShowSuperseded = false;
+let graphSourceFilter = '';
+let graphAutoRotate = true;
+let graphForceLabels = false;
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -663,17 +730,22 @@ function svgEl(tag, attrs) {
   return el;
 }
 
+function dcRadius() { return globeRadius * DC_GLOBE_RATIO; }
+function labelsVisible() { return graphForceLabels || graphNodes.length <= 40; }
+
 // Deterministic sphere placement, ranked by connection count — NOT random.
-// The single most-connected capture sits at (lat=0, lon=0): dead center of
-// the equator, front-and-center at rotation=0. The rest spiral outward by
-// rank: remaining nodes alternate north/south hemispheres with latitude
-// magnitude growing with rank (so "distance from the equator" visually
-// encodes "how connected"), longitude spreads via the golden angle for
-// even coverage as the globe turns. Computed once and cached — the
-// strength slider changes which EDGES are visible, never where a capture
-// physically sits, so the sphere's shape stays a stable reference frame
-// across every interaction, matching Reset Layout's "static starting
-// point" principle.
+// The single most-connected capture in the given set sits at (lat=0,
+// lon=0): dead center of the equator, front-and-center at rotation=0. The
+// rest spiral outward by rank: remaining nodes alternate north/south
+// hemispheres with latitude magnitude growing with rank (so "distance from
+// the equator" visually encodes "how connected"), longitude spreads via
+// the golden angle for even coverage as the globe turns. Called once for
+// the outer (non-DC) captures and once for the DC captures — each sphere
+// gets its own independent equator-center. Computed once per sphere and
+// cached — the strength slider changes which EDGES are visible, never
+// where a capture physically sits, so each sphere's shape stays a stable
+// reference frame across every interaction, matching Reset Layout's
+// "resets the view, not the data" principle.
 function computeGlobePositions(captures, degreeMap) {
   const ranked = [...captures].sort((a, b) => (degreeMap.get(b.id) || 0) - (degreeMap.get(a.id) || 0));
   const n = ranked.length;
@@ -690,31 +762,53 @@ function computeGlobePositions(captures, degreeMap) {
   return positions;
 }
 
-// Orthographic sphere -> 2D projection. depth is 0 (far side) .. 1 (near
-// side); used to scale/dim/reorder elements for the 3D illusion.
-function projectGlobe(pos, rotation) {
+// Orthographic sphere -> 2D projection at an arbitrary radius (the outer
+// main sphere and the inner DC sphere share the same center and rotation,
+// differing only in radius). depth is 0 (far side) .. 1 (near side); used
+// to scale/dim/reorder elements for the 3D illusion.
+function projectOnSphere(pos, rotation, radius) {
   const lon = pos.lon + rotation;
   const cosLat = Math.cos(pos.lat);
-  const x3d = GLOBE_R * cosLat * Math.sin(lon);
-  const y3d = GLOBE_R * Math.sin(pos.lat);
-  const z3d = GLOBE_R * cosLat * Math.cos(lon);
-  return { x: GRAPH_CX + x3d, y: GRAPH_CY - y3d, depth: (z3d / GLOBE_R + 1) / 2 };
+  const x3d = radius * cosLat * Math.sin(lon);
+  const y3d = radius * Math.sin(pos.lat);
+  const z3d = radius * cosLat * Math.cos(lon);
+  return { x: GRAPH_CX + x3d, y: GRAPH_CY - y3d, depth: (z3d / radius + 1) / 2 };
+}
+
+// Personalization: which captures are currently eligible to appear at all
+// (independent of the strength slider, which only ever filters EDGES).
+function graphVisibleCaptures() {
+  return DATA.captures.filter(c =>
+    (graphShowSuperseded || !c.superseded) &&
+    (!graphSourceFilter || c.source === graphSourceFilter)
+  );
 }
 
 function buildGraphData(minStrength) {
   currentMinStrength = minStrength;
+  const visible = graphVisibleCaptures();
   const filteredEdges = filterGraphEdges(DATA.edges, minStrength);
-  const degrees = computeDegrees(DATA.captures.map(c => c.id), filteredEdges);
-  if (globePositions.size === 0) {
-    const fullDegrees = computeDegrees(DATA.captures.map(c => c.id), DATA.edges);
-    globePositions = computeGlobePositions(DATA.captures, fullDegrees);
+  const degrees = computeDegrees(visible.map(c => c.id), filteredEdges);
+
+  const outerCaptures = visible.filter(c => c.type !== 'DC');
+  const dcCaptures = visible.filter(c => c.type === 'DC');
+  const fullDegrees = computeDegrees(visible.map(c => c.id), DATA.edges);
+  if (globePositions.size === 0 && outerCaptures.length) {
+    globePositions = computeGlobePositions(outerCaptures, fullDegrees);
   }
-  graphNodes = DATA.captures.map(c => {
+  if (dcGlobePositions.size === 0 && dcCaptures.length) {
+    dcGlobePositions = computeGlobePositions(dcCaptures, fullDegrees);
+  }
+
+  graphNodes = visible.map(c => {
     const deg = degrees.get(c.id) || 0;
     const r = Math.max(5, Math.min(16, 5 + deg * 1.3));
-    const pos = globePositions.get(c.id);
-    return { id: c.id, lat: pos.lat, lon: pos.lon, r, deg, cap: c };
-  });
+    const isDC = c.type === 'DC';
+    const pos = (isDC ? dcGlobePositions : globePositions).get(c.id);
+    if (!pos) return null; // defensive — shouldn't happen
+    return { id: c.id, lat: pos.lat, lon: pos.lon, r, deg, cap: c, isDC };
+  }).filter(Boolean);
+
   const nodeById = new Map(graphNodes.map(n => [n.id, n]));
   graphSimLinks = filteredEdges
     .map(e => ({ ...e, _s: nodeById.get(e.source), _t: nodeById.get(e.target) }))
@@ -817,13 +911,14 @@ function renderGraphStructure() {
   edgesG.innerHTML = '';
   for (const l of graphSimLinks) {
     const directional = l.type === 'reference' || l.type === 'asserted';
-    const line = svgEl('line', { class: `edge e-${l.type}${relationClass(l)}` });
+    const isRod = l._s.isDC !== l._t.isDC;
+    const line = svgEl('line', { class: `edge e-${l.type}${relationClass(l)}${isRod ? ' e-rod' : ''}` });
     if (directional) line.setAttribute('marker-end', 'url(#arrow)');
     line._link = l;
     edgesG.appendChild(line);
   }
   nodesG.innerHTML = '';
-  const showLabels = graphNodes.length <= 40;
+  const showLabels = labelsVisible();
   for (const n of graphNodes) {
     const c = n.cap;
     const g = svgEl('g', {
@@ -841,8 +936,21 @@ function renderGraphStructure() {
     g.addEventListener('pointerleave', hideGraphTooltip);
     nodesG.appendChild(g);
   }
+  updateGlobeGuides();
   renderGraphPositions();
   renderGraphSummary();
+}
+
+// Keeps the static outline/equator/inner-sphere guide shapes in sync with
+// the current (user-adjustable) globe size, and hides the inner-sphere
+// guide entirely when there are no DC captures to nest inside it.
+function updateGlobeGuides() {
+  document.getElementById('globe-outline').setAttribute('r', globeRadius);
+  document.getElementById('globe-equator').setAttribute('x1', GRAPH_CX - globeRadius);
+  document.getElementById('globe-equator').setAttribute('x2', GRAPH_CX + globeRadius);
+  const dcOutline = document.getElementById('dc-globe-outline');
+  dcOutline.setAttribute('r', dcRadius());
+  dcOutline.style.display = graphNodes.some(n => n.isDC) ? '' : 'none';
 }
 
 // Projects every node/edge to its current screen position and re-orders the
@@ -851,13 +959,17 @@ function renderGraphStructure() {
 // without this the sphere illusion breaks the moment two elements overlap
 // in the wrong z-order. Each element carries its data via a direct property
 // (_node / _link) rather than array-index correspondence, because the
-// reordering itself changes DOM order every single frame.
+// reordering itself changes DOM order every single frame. DC nodes project
+// against the smaller inner-sphere radius; everything else against the
+// outer one — both share the same center and rotation angle.
 function renderGraphPositions() {
   const nodesG = document.getElementById('graph-nodes');
   const edgesG = document.getElementById('graph-edges');
   if (!nodesG || !edgesG) return; // graph host was replaced (empty-state message)
 
-  const proj = new Map(graphNodes.map(n => [n.id, projectGlobe({ lat: n.lat, lon: n.lon }, globeRotation)]));
+  const dcR = dcRadius();
+  const proj = new Map(graphNodes.map(n =>
+    [n.id, projectOnSphere({ lat: n.lat, lon: n.lon }, globeRotation, n.isDC ? dcR : globeRadius)]));
 
   const nodeOrder = [...nodesG.children]
     .map(el => ({ el, p: proj.get(el._node.id) }))
@@ -884,18 +996,43 @@ function renderGraphPositions() {
   }
 }
 
-function ensureGlobeLoopRunning() {
-  if (globeLoopRunning || !DATA.captures.length) return;
-  globeLoopRunning = true;
-  requestAnimationFrame(stepGlobe);
+// ---- rotation: a BOUNDED, decaying spin (like a coin settling), never a
+// perpetual animation. spinVelocity decays toward 0 every tick it's active;
+// once it crosses the stop threshold the loop fully stops rescheduling
+// itself (globeLoopRunning=false) rather than idling forever. Reset, the
+// strength slider, and every personalization toggle explicitly zero
+// spinVelocity, so nothing can keep "continuing" underneath a control the
+// user just touched — that was the exact bug reported against the
+// previous (perpetual, never-stopping) version. Dragging or selecting a
+// node PAUSES rotation (freezes it, keeps the loop hot to resume the
+// instant the pause clears) — a materially different state from actually
+// having settled to a stop.
+function startRevealSpin() {
+  if (!graphAutoRotate || prefersReducedMotion) return;
+  spinVelocity = SPIN_INITIAL_VELOCITY;
+  if (!globeLoopRunning) { globeLoopRunning = true; requestAnimationFrame(stepGlobe); }
 }
 function stepGlobe() {
   if (state.mode !== 'graph') { globeLoopRunning = false; return; }
-  if (!dragActive && graphSelected === null && !prefersReducedMotion) {
-    globeRotation += GLOBE_SPIN_SPEED;
+  const paused = dragActive || graphSelected !== null;
+  const spinEnabled = graphAutoRotate && !prefersReducedMotion;
+  let stillSpinning = false;
+  if (!paused) {
+    if (spinEnabled && Math.abs(spinVelocity) > SPIN_STOP_THRESHOLD) {
+      globeRotation += spinVelocity;
+      spinVelocity *= SPIN_DECAY;
+      stillSpinning = Math.abs(spinVelocity) > SPIN_STOP_THRESHOLD;
+      if (!stillSpinning) spinVelocity = 0; // clamp the final decayed residual to an exact, clean stop
+    } else {
+      spinVelocity = 0;
+    }
   }
   renderGraphPositions();
-  requestAnimationFrame(stepGlobe);
+  if (paused || stillSpinning) {
+    requestAnimationFrame(stepGlobe); // still spinning, or a temporary pause that will resume
+  } else {
+    globeLoopRunning = false; // settled (or spin disabled) — fully stop until something restarts it
+  }
 }
 
 function ensureGraphInit() {
@@ -909,34 +1046,88 @@ function ensureGraphInit() {
   buildGraphData(GRAPH_DEFAULT_STRENGTH);
   wireGraphInteraction();
   renderGraphStructure();
-  if (prefersReducedMotion) return; // static globe; drag-to-rotate still works
   // Hold the initial static view — most-connected capture front and center
-  // on the equator — for a beat before the slow spin begins, so the viewer
+  // on the equator — for a beat before the spin begins, so the viewer
   // registers "here is my data" before watching it turn.
-  setTimeout(ensureGlobeLoopRunning, 400);
+  setTimeout(startRevealSpin, 400);
 }
 
 function onGraphStrengthChange() {
   const v = parseFloat(document.getElementById('gminstrength').value);
   document.getElementById('gminstrength-val').textContent = v.toFixed(1);
+  spinVelocity = 0; // halt any in-progress spin the moment the user adjusts anything
   buildGraphData(v);
   clearGraphSelection();
   renderGraphStructure();
 }
 
-function resetGraphLayout() {
-  // Resets the VIEW, not the data: rotation returns to 0 (most-connected
-  // capture front-and-center again) and the strength slider returns to its
-  // default. globePositions is deliberately NOT recomputed here — which
-  // capture sits where on the sphere is a stable structural fact, not
-  // something a "reset layout" click should ever reshuffle.
-  document.getElementById('gminstrength').value = String(GRAPH_DEFAULT_STRENGTH);
-  document.getElementById('gminstrength-val').textContent = GRAPH_DEFAULT_STRENGTH.toFixed(1);
-  buildGraphData(GRAPH_DEFAULT_STRENGTH);
-  globeRotation = 0;
+function onGlobeSizeChange() {
+  globeRadius = parseFloat(document.getElementById('gsize').value);
+  document.getElementById('gsize-val').textContent = String(globeRadius);
+  spinVelocity = 0;
+  updateGlobeGuides();
+  renderGraphPositions();
+}
+
+function onGraphSupersededToggle() {
+  graphShowSuperseded = document.getElementById('gshowsup').checked;
+  spinVelocity = 0;
+  globePositions = new Map(); dcGlobePositions = new Map(); // the visible pool changed
+  buildGraphData(currentMinStrength);
   clearGraphSelection();
   renderGraphStructure();
-  ensureGlobeLoopRunning();
+}
+
+function onGraphSourceChange() {
+  graphSourceFilter = document.getElementById('gsource').value;
+  spinVelocity = 0;
+  globePositions = new Map(); dcGlobePositions = new Map();
+  buildGraphData(currentMinStrength);
+  clearGraphSelection();
+  renderGraphStructure();
+}
+
+function onGraphAutoRotateToggle() {
+  graphAutoRotate = document.getElementById('gautorotate').checked;
+  if (graphAutoRotate) startRevealSpin(); else spinVelocity = 0;
+}
+
+function onGraphLabelsToggle() {
+  graphForceLabels = document.getElementById('gforcelabels').checked;
+  renderGraphStructure();
+}
+
+function resetGraphLayout() {
+  // Resets the VIEW, not the data: rotation, size, and every
+  // personalization toggle return to their defaults, and any spin in
+  // progress is explicitly halted — Reset snaps directly to a static
+  // view, it does not replay the intro spin. globePositions/
+  // dcGlobePositions ARE recomputed here (the visible pool may have
+  // changed via the toggles being reset), but which capture sits where
+  // on either sphere is otherwise a stable structural fact this action
+  // does not reshuffle.
+  document.getElementById('gminstrength').value = String(GRAPH_DEFAULT_STRENGTH);
+  document.getElementById('gminstrength-val').textContent = GRAPH_DEFAULT_STRENGTH.toFixed(1);
+  document.getElementById('gsize').value = String(GLOBE_SIZE_DEFAULT);
+  document.getElementById('gsize-val').textContent = String(GLOBE_SIZE_DEFAULT);
+  document.getElementById('gshowsup').checked = false;
+  document.getElementById('gsource').value = '';
+  document.getElementById('gautorotate').checked = true;
+  document.getElementById('gforcelabels').checked = false;
+
+  graphShowSuperseded = false;
+  graphSourceFilter = '';
+  graphAutoRotate = true;
+  graphForceLabels = false;
+  globeRadius = GLOBE_SIZE_DEFAULT;
+  globeRotation = 0;
+  spinVelocity = 0;
+  globePositions = new Map();
+  dcGlobePositions = new Map();
+
+  buildGraphData(GRAPH_DEFAULT_STRENGTH);
+  clearGraphSelection();
+  renderGraphStructure();
 }
 
 // ---- graph interaction: drag anywhere to spin the globe; a stationary
@@ -969,7 +1160,10 @@ function onSvgPointerMove(ev) {
   if (!dragActive) return;
   const x = svgPoint(ev).x;
   const dx = x - dragStartX;
-  if (!dragMoved && Math.abs(dx) > 2) dragMoved = true;
+  if (!dragMoved && Math.abs(dx) > 2) {
+    dragMoved = true;
+    document.getElementById('graph-svg').classList.add('dragging');
+  }
   if (dragMoved) {
     globeRotation = dragStartRotation + dx * 0.01;
     renderGraphPositions();
@@ -978,12 +1172,14 @@ function onSvgPointerMove(ev) {
 function onSvgPointerUp() {
   if (!dragActive) return;
   dragActive = false;
+  document.getElementById('graph-svg').classList.remove('dragging');
   if (!dragMoved) {
     if (dragNodeHit) selectGraphNode(dragNodeHit);
     else clearGraphSelection();
+  } else {
+    spinVelocity = 0; // a manual rotation ends any leftover reveal-spin momentum
   }
   dragNodeHit = null;
-  ensureGlobeLoopRunning();
 }
 
 function wireGraphInteraction() {
@@ -1030,13 +1226,13 @@ function showGraphPanel(n) {
 function hideGraphPanel() { document.getElementById('graph-panel').hidden = true; }
 
 function showGraphTooltip(n) {
-  if (graphNodes.length <= 40) return; // static labels already visible
+  if (labelsVisible()) return; // static labels already visible
   const tip = document.getElementById('graph-tooltip');
   tip.hidden = false;
   tip.textContent = label(n.cap);
   const svg = document.getElementById('graph-svg');
   const rect = svg.getBoundingClientRect();
-  const p = projectGlobe({ lat: n.lat, lon: n.lon }, globeRotation);
+  const p = projectOnSphere({ lat: n.lat, lon: n.lon }, globeRotation, n.isDC ? dcRadius() : globeRadius);
   tip.style.left = (p.x * (rect.width / GRAPH_W)) + 'px';
   tip.style.top = (p.y * (rect.height / GRAPH_H)) + 'px';
 }
