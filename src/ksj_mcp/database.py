@@ -70,7 +70,7 @@ def init_db(db_path: Path | None = None) -> None:
                 type        TEXT NOT NULL,           -- tag_overlap | entity_overlap | reference | asserted
                 strength    REAL NOT NULL DEFAULT 1.0,
                 method      TEXT NOT NULL,
-                relation    TEXT,                    -- supersedes | refutes | narrows | supports (asserted only)
+                relation    TEXT,                    -- supersedes | refutes | narrows | supports | distills (asserted only)
                 note        TEXT,                    -- optional human annotation
                 asserted_by TEXT NOT NULL DEFAULT 'derived'  -- 'derived' | 'user'
             );

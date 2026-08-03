@@ -252,7 +252,7 @@ Once connected, talk to your AI assistant naturally.
 | `bulk_upload` | Process a whole folder of photos at once (local OCR) |
 | `set_volume` | Multiple journals: set which book new captures go into and which books search sees |
 | `assert_entity` | Link a named entity (person, place, work, dream symbol) to a capture |
-| `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports another — superseded claims are kept in history but leave current search |
+| `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports / distills another — superseded claims are kept in history but leave current search |
 | `rebuild_connections` | Re-derive the connection graph from current tags and text (asserted edges are never touched) |
 | `find_path` | Shortest chain of connections between two captures |
 | `neighborhood` | Everything within N hops of a capture — its local knowledge cluster |
@@ -266,7 +266,8 @@ Once connected, talk to your AI assistant naturally.
 | `get_stats` | Overview: counts, top tags, open questions, insights, date range |
 | `export_captures` | Dump your knowledge base as Markdown or JSON |
 | `suggest_synthesis` | Find RC topic clusters ready to become a SYN entry |
-| `surface_connections` | Independently scan the RC cluster behind a SYN page you've already written, then run a structured comparison dialogue — runs after the page exists, never before; no DB write yet (`commit_distillation` not implemented) |
+| `surface_connections` | Independently scan the RC cluster behind a SYN page you've already written, then run a structured comparison dialogue — runs after the page exists, never before; no DB write |
+| `commit_distillation` | Store the confirmed outcome of a `surface_connections` dialogue as an AIEX entry, linked to its SYN page with an asserted `distills` edge |
 | `export_study_deck` | Export `?` questions as a portable CSV study deck (Anki, Quizlet, Notion, etc.) |
 | `journal_health` | KPI dashboard + coaching: velocity, synthesis ratio, review cadence, open questions |
 | `get_breakthroughs` | All SYN entries chronologically — your complete breakthrough timeline |

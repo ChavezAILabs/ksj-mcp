@@ -1,7 +1,7 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-29 tools:
+30 tools:
   export_html        — Self-contained HTML view: timeline, index, connections, graph
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
@@ -23,7 +23,8 @@ KSJ MCP Server — FastMCP entry point.
   get_stats          — Summary counts, top tags, open questions
   export_captures    — Dump captures as Markdown or JSON
   suggest_synthesis  — Find RC clusters ready for a SYN entry
-  surface_connections— Independent scan of a SYN page's RC cluster + comparison dialogue (Phase 1/2; no DB write yet)
+  surface_connections— Independent scan of a SYN page's RC cluster + comparison dialogue (Phase 1/2; no DB write)
+  commit_distillation— Store a confirmed surface_connections dialogue outcome as an AIEX entry, linked to its SYN page
   export_study_deck  — Export ? questions as a portable study deck CSV
   journal_health     — KPI dashboard + coaching recommendations
   get_breakthroughs  — All SYN entries chronologically with insights
@@ -966,6 +967,10 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
       refutes    — source contradicts target.
       narrows    — source restricts target's claim without overturning it.
       supports   — source is evidence for target.
+      distills   — source (an AIEX distillation entry) is derived from
+                   target (a SYN page). Normally set automatically by
+                   commit_distillation(); asserting it by hand is for
+                   fixing or adding a link that tool didn't create.
 
     Automatic contradiction detection is deliberately not offered — it
     cannot be done reliably. Supersession is either asserted here by a
@@ -974,12 +979,12 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
 
     Args:
         source_id: The newer / asserting capture (numeric ID).
-        target_id: The capture being superseded / refuted / supported.
-        relation:  supersedes | refutes | narrows | supports
+        target_id: The capture being superseded / refuted / supported / distilled.
+        relation:  supersedes | refutes | narrows | supports | distills
         note:      Optional one-line reason, stored on the edge.
     """
     relation = relation.strip().lower()
-    valid = {"supersedes", "refutes", "narrows", "supports"}
+    valid = {"supersedes", "refutes", "narrows", "supports", "distills"}
     if relation not in valid:
         return f"Unknown relation {relation!r} — use one of: {', '.join(sorted(valid))}."
     if source_id == target_id:
@@ -1735,8 +1740,8 @@ def surface_connections(
     its connection map, so the Phase 2 comparison is meaningful rather than
     confirmatory. This tool does NOT write to the database — it prepares
     the scan data and dialogue instructions for Claude to run in this
-    conversation. `commit_distillation()`, which will persist the outcome,
-    is not implemented yet — do not attempt to call it.
+    conversation. Call `commit_distillation()` after the user approves the
+    dialogue's outcome, to persist it.
 
     Trigger phrases: "Run surface_connections on SYN-004", "Compare my
     synthesis against an independent scan".
@@ -1883,6 +1888,7 @@ def surface_connections(
         "deep":     "Ask up to three or four questions per tier, and proactively "
                     "check whether any single connection deserves more.",
     }[depth]
+    today = datetime.now(timezone.utc).date().isoformat()
 
     return f"""## surface_connections — {syn_template_id}
 Cluster: {cluster_desc} · {len(rc_caps)} RC entries{ocr_warning}
@@ -1967,10 +1973,189 @@ Produce a revised connection map with FOUR categories:
   from the user, not from any signal you could have found)
 
 The distillation — what the comparison revealed, not the connection list or
-the dialogue transcript — is the artifact worth keeping. `commit_distillation()`
-is not implemented yet, so do not attempt to call it: present the revised
-map and the distillation to the user directly, and note it's ready to be
-stored once that tool ships."""
+the dialogue transcript — is the artifact worth keeping. Write it as 2-5
+sentences of what the comparison means, not a re-listing of the four
+categories. Present the revised map and the distillation to the user, and
+only after they approve, call `commit_distillation()`:
+
+```json
+{{
+  "syn_template_id": "{syn_template_id}",
+  "date": "{today}",
+  "distillation": "<2-5 sentences: what the comparison revealed and what it means>",
+  "confirmed":   ["<connection description>"],
+  "retired":     ["<connection description>"],
+  "deferred":    ["<connection description>"],
+  "missed":      ["<connection description>"],
+  "beyond_scan": ["<what {syn_template_id} held that the scan could not reach>"],
+  "tags": ["#topic1", "#topic2"]
+}}
+```
+
+No database write occurs until `commit_distillation()` is called with confirmed data."""
+
+
+# ── Tool: commit_distillation ─────────────────────────────────────────────────
+
+@mcp.tool()
+def commit_distillation(distillation_json: str) -> str:
+    """
+    Store the confirmed outcome of a surface_connections() dialogue.
+
+    Call this after the Phase 2 dialogue concludes and the user has
+    reviewed the revised connection map. Only the distillation — what the
+    comparison revealed, not the connection list or the dialogue
+    transcript itself — is stored as the entry's text; the four categories
+    are kept as supporting detail alongside it.
+
+    Never creates a SYN template ID — SYN numbers belong to physical
+    pages. Stores with source='ai_extract' (excluded from journal_health
+    KPIs, distinguishable in get_breakthroughs()/export_html()) using the
+    AIEX sequence, and links to the SYN page with an asserted 'distills'
+    edge (source: the new AIEX entry, target: the SYN page).
+
+    Args:
+        distillation_json: JSON string with fields:
+          syn_template_id (required) — the SYN page this distills.
+          distillation     (required) — 2-5 sentences: what the comparison
+                           revealed and what it means. This is the artifact.
+          confirmed, retired, deferred, missed, beyond_scan — lists of
+                           strings, one per connection-map entry (all
+                           optional, default empty).
+          tags             — optional list of "#topic"/"@source"/etc strings.
+          date             — optional ISO date; defaults to today.
+
+    Returns a confirmation with the assigned AIEX ID and the distills edge.
+    """
+    try:
+        data = json.loads(distillation_json)
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}\n\nMake sure to pass a valid JSON string."
+
+    syn_template_id = (data.get("syn_template_id") or "").strip().upper()
+    distillation    = (data.get("distillation") or "").strip()
+
+    if not syn_template_id:
+        return "distillation_json must include syn_template_id — the SYN page this distills."
+    if not distillation:
+        return (
+            "distillation_json must include a non-empty 'distillation' field — "
+            "the artifact worth keeping, not the raw connection list."
+        )
+
+    date        = data.get("date") or datetime.now(timezone.utc).date().isoformat()
+    confirmed   = data.get("confirmed", [])
+    retired     = data.get("retired", [])
+    deferred    = data.get("deferred", [])
+    missed      = data.get("missed", [])
+    beyond_scan = data.get("beyond_scan", [])
+    tag_strings = data.get("tags", [])
+
+    with _db() as con:
+        syn_cap = get_capture_by_template(con, syn_template_id, type_="SYN")
+        if syn_cap is None:
+            return (
+                f"No Synthesis page found for {syn_template_id} — commit_distillation "
+                "links to an existing SYN page and never creates one. Check the template ID."
+            )
+
+        content = {
+            "distillation":    distillation,
+            "syn_template_id": syn_template_id,
+            "date":            date,
+            "confirmed":       confirmed,
+            "retired":         retired,
+            "deferred":        deferred,
+            "missed":          missed,
+            "beyond_scan":     beyond_scan,
+        }
+
+        # Tags: same normalize + role pipeline as commit_aiex, so
+        # distillation tags show up in the Index view and role filters
+        # identically to every other AIEX entry.
+        tags: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for tag_str in tag_strings:
+            tag_str = tag_str.strip()
+            if len(tag_str) < 2:
+                continue
+            if tag_str[0] in ('#', '@', '!', '?', '$', '*'):
+                prefix, raw_value = tag_str[0], tag_str[1:]
+            else:
+                prefix, raw_value = '#', tag_str
+            value = normalize_tag_value(raw_value)
+            if not value:
+                continue
+            key = (prefix, value)
+            if key not in seen:
+                seen.add(key)
+                tags.append({
+                    "prefix":  prefix,
+                    "value":   value,
+                    "display": raw_value,
+                    "role":    assign_role(prefix, value, "AIEX"),
+                })
+        for t in extract_schema_tags(distillation, "AIEX"):
+            key = (t["prefix"], t["value"])
+            if key not in seen:
+                seen.add(key)
+                tags.append(t)
+
+        aiex_id    = get_next_aiex_id(con)
+        capture_id = insert_capture(
+            con,
+            type_="AIEX",
+            template_id=aiex_id,
+            content=content,
+            raw_ocr=distillation,
+            summary=distillation[:200],
+            confidence=1.0,
+            image_path="",
+            source="ai_extract",
+        )
+        insert_tags(con, capture_id, tags)
+        con.commit()
+
+        connections = build_connections(con, capture_id)
+
+        # §3.4/§5.1: link to the SYN page with an asserted 'distills' edge.
+        # asserted_by='user' (not 'derived') is deliberate, not an
+        # inaccuracy: the human approved this link by confirming the
+        # dialogue's outcome, the same trust level as a manual
+        # assert_connection() call. rebuild_connections() deletes every
+        # edge WHERE asserted_by != 'user' and nothing else re-derives a
+        # distills edge from tags/text — anything else here would make
+        # this link silently vanish on the next rebuild.
+        insert_connection(
+            con, capture_id, syn_cap["id"], "asserted", 1.0, "asserted",
+            relation="distills", asserted_by="user",
+        )
+        con.commit()
+
+    tag_str    = ", ".join(f"{t['prefix']}{t['value']}" for t in tags) or "none"
+    cat_counts = (
+        f"confirmed: {len(confirmed)}, retired: {len(retired)}, "
+        f"deferred: {len(deferred)}, missed: {len(missed)}, "
+        f"beyond scan: {len(beyond_scan)}"
+    )
+    lines = [
+        f"Distillation Commit — {aiex_id} (#{capture_id})\n{'─' * 40}",
+        f"  Distills : {syn_template_id}",
+        f"  Date     : {date}",
+        f"  Tags     : {tag_str}",
+        f"\n{distillation}",
+        f"\nConnection map — {cat_counts}",
+    ]
+    if connections:
+        lines.append(f"\n{len(connections)} connection(s) detected on commit:")
+        for c in connections[:10]:
+            shared = f" (shared: {', '.join(c['shared_tags'])})" if c.get("shared_tags") else ""
+            lines.append(f"  → {c['connected_template']} [{c['method']}]{shared}")
+        if len(connections) > 10:
+            lines.append(f"  … and {len(connections) - 10} more")
+    lines.append(f"\nLinked to {syn_template_id} with a 'distills' edge (asserted).")
+    lines.append("Stored as type=AIEX (AI-Extracted; excluded from journal_health KPIs).")
+    return "\n".join(lines)
 
 
 # ── Tool: export_study_deck ───────────────────────────────────────────────────
