@@ -749,17 +749,23 @@ function labelsVisible() { return graphForceLabels || graphNodes.length <= 40; }
 // the equator" visually encodes "how connected"), longitude spreads via
 // the golden angle for even coverage as the globe turns. Called once for
 // the outer (non-DC) captures and once for the DC captures — each sphere
-// gets its own independent equator-center. Computed once per sphere and
+// gets its own independent equator-center. Both hubs sit at lat=0, and at
+// lat=0 the projection's x/z terms are radius*sin(lon)/radius*cos(lon) —
+// the radius factors out, so two hubs at the SAME (lat=0, lon=0) project
+// to the exact same screen pixel regardless of how different their sphere
+// radii are. `lonOffset` (a quarter turn for the DC sphere, see the
+// buildGraphData call site) keeps both hubs on the equator while pulling
+// them apart in screen space. Computed once per sphere and
 // cached — the strength slider changes which EDGES are visible, never
 // where a capture physically sits, so each sphere's shape stays a stable
 // reference frame across every interaction, matching Reset Layout's
 // "resets the view, not the data" principle.
-function computeGlobePositions(captures, degreeMap) {
+function computeGlobePositions(captures, degreeMap, lonOffset = 0) {
   const ranked = [...captures].sort((a, b) => (degreeMap.get(b.id) || 0) - (degreeMap.get(a.id) || 0));
   const n = ranked.length;
   const positions = new Map();
   if (!n) return positions;
-  positions.set(ranked[0].id, { lat: 0, lon: 0 }); // most-connected: exact equator center
+  positions.set(ranked[0].id, { lat: 0, lon: lonOffset }); // most-connected: exact equator center
   if (n === 1) return positions;
 
   const golden = Math.PI * (3 - Math.sqrt(5));
@@ -776,7 +782,7 @@ function computeGlobePositions(captures, degreeMap) {
     // angles. The golden-angle longitude spiral is unchanged.
     const t = rank / m;
     const lat = hemisphere * t * (Math.PI / 2) * 0.94;
-    const lon = golden * rank;
+    const lon = lonOffset + golden * rank;
     positions.set(c.id, { lat, lon });
   });
   return positions;
@@ -817,7 +823,16 @@ function buildGraphData(minStrength) {
     globePositions = computeGlobePositions(outerCaptures, fullDegrees);
   }
   if (dcGlobePositions.size === 0 && dcCaptures.length) {
-    dcGlobePositions = computeGlobePositions(dcCaptures, fullDegrees);
+    // Quarter-turn offset so the DC sphere's rank-0 (most-connected) node
+    // is not pinned to the SAME screen pixel as the outer sphere's at
+    // rotation=0 (the state Reset Layout freezes on) — both stay exactly
+    // on their own equator, just not aligned to the same longitude. This
+    // does NOT guarantee separation at every rotation angle: two equator
+    // points sharing one rotation variable but different radii are
+    // same-frequency sinusoids in screen-x, so their difference still
+    // has a zero every ~half turn for any constant offset. See the BUG-1
+    // note on computeGlobePositions and BUGS_htmlview_graph_2026-08-03.md.
+    dcGlobePositions = computeGlobePositions(dcCaptures, fullDegrees, Math.PI / 2);
   }
 
   graphNodes = visible.map(c => {
@@ -910,7 +925,10 @@ function graphSummaryHtml() {
     sentences.push(`${plural(s.isolated.length, 'capture')} isolated at this threshold.`);
   }
   if (s.topNode && (s.degreeMap.get(s.topNode.id) || 0) > 0) {
-    sentences.push(`Most connected (equator center): <span class="tid">${esc(label(s.topNode.cap))}</span> `
+    // BUG-3: topNode can be on either sphere — name the sphere it's
+    // actually centered on, not always the outer one.
+    const sphereLabel = s.topNode.isDC ? 'dream sphere center' : 'equator center';
+    sentences.push(`Most connected (${sphereLabel}): <span class="tid">${esc(label(s.topNode.cap))}</span> `
       + `(${plural(s.degreeMap.get(s.topNode.id), 'connection')}).`);
   }
   return sentences.join(' ');
