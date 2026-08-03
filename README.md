@@ -233,9 +233,9 @@ Once connected, talk to your AI assistant naturally.
 > "How's my journal practice looking?"
 
 > "Give me a browsable view of my whole knowledge base" → writes a self-contained
-> `.html` file — timeline, tag/entity index, per-capture connection lists, and
-> a force-directed connection graph — you can open in any browser, no server
-> or install required
+> `.html` file — timeline (with date-range search), tag/entity index,
+> per-capture connection lists, and a slowly rotating connection globe — you
+> can open in any browser, no server or install required
 
 ---
 
@@ -259,7 +259,7 @@ Once connected, talk to your AI assistant naturally.
 | `lint` | Health check: orphan captures, un-closed superseded claims, unresolved contradictions, stale open questions, fragmented tags |
 | `export_backup` | Full knowledge base to a versioned JSONL file ([format doc](docs/EXPORT_FORMAT.md)) |
 | `import_backup` | Restore a JSONL backup — additive, nothing overwritten |
-| `export_html` | Self-contained, offline HTML view — timeline, tag/entity index, per-capture connection lists, and a force-directed connection graph, opens in any browser |
+| `export_html` | Self-contained, offline HTML view — timeline with date search, tag/entity index, per-capture connection lists, and a rotating connection globe, opens in any browser |
 | `search_captures` | Full-text search with optional tag and date filters |
 | `list_by_tag` | Browse all captures with a given tag or prefix |
 | `find_connections` | Show tag-overlap and `@`-reference connections for a capture |

@@ -6,12 +6,17 @@ Overview modes ship in stages, gated only by the data each needs:
   Mode 2 — Index: tags grouped by semantic role, plus the entity register.
   Mode 3 — Connections: every capture card lists its typed, directional
            edges as clickable links (no spatial layout, just adjacency).
-  Mode 4 — Graph: force-directed visualization, gated on edge quality and
-           typed edges (server 3.0/3.1) so it never renders a hairball.
-           Starts from a fixed circular layout (not random — Reset Layout
-           always returns to the same arrangement) and settles into place;
-           a plain-language summary above the graph describes what's
-           currently shown and updates as the strength threshold changes.
+  Mode 4 — Graph: a rotating globe, gated on edge quality and typed edges
+           (server 3.0/3.1) so it never renders a hairball. Each capture
+           sits at a fixed point on a sphere — the most-connected capture
+           dead center of the equator, the rest spiraling outward by
+           connection rank — and the sphere slowly auto-rotates; drag to
+           spin it manually, click a node to inspect it. Reset Layout
+           returns the view (not the data) to rotation 0 at the default
+           strength threshold — the sphere's shape itself never reshuffles.
+           A plain-language summary above the graph, including the time
+           span of what's shown, describes what's currently visible and
+           updates as the strength threshold changes.
 
 One .html file, all data inlined as JSON, vanilla JS/CSS, no network access,
 no build step, opens in any browser. Everything user-authored is escaped
@@ -251,7 +256,11 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .line.e-tag_overlap { background: var(--muted); opacity: .5; }
 #view-graph { position: relative; }
 #graph-svg { width: 100%; height: 64vh; min-height: 360px; display: block;
-  border: 1px solid var(--line); border-radius: 12px; background: var(--card); touch-action: none; }
+  border: 1px solid var(--line); border-radius: 12px; background: var(--card); touch-action: none;
+  cursor: grab; }
+#graph-svg:active { cursor: grabbing; }
+.globe-outline { fill: none; stroke: var(--line); stroke-width: 1; opacity: .6; }
+.globe-equator { stroke: var(--accent); stroke-width: 1; opacity: .28; stroke-dasharray: 2 4; }
 .arrowhead { fill: var(--muted); }
 .node circle.body { stroke: var(--card); stroke-width: 1.5; cursor: pointer; }
 .node.t-RC circle.body { fill: var(--type-rc); }
@@ -262,7 +271,11 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .node.superseded circle.body { opacity: .5; stroke-dasharray: 2 2; }
 .node.src-ai circle.body { stroke: var(--accent); stroke-width: 2; }
 .node .node-label { font-size: 9px; fill: var(--ink); pointer-events: none; user-select: none; }
-.node.dimmed { opacity: .15; }
+/* !important: nodes/edges get a per-frame inline opacity from the globe's
+   depth cue (renderGraphPositions), which — being an inline style — would
+   otherwise always beat a plain class rule in the cascade and silently
+   mask the ego-highlight dimming on every animation frame. */
+.node.dimmed { opacity: .15 !important; }
 .node:hover circle.body { stroke: var(--ink); stroke-width: 2.5; }
 .edge { fill: none; stroke: var(--muted); stroke-opacity: .3; stroke-width: 1; }
 .edge.e-reference { stroke: var(--accent); stroke-opacity: .8; stroke-width: 1.6; }
@@ -309,12 +322,14 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
       <option value="ai_extract">AI-extracted only</option>
     </select>
     <label><input type="checkbox" id="fsup" onchange="render()"> show superseded</label>
+    <label>from <input type="date" id="fdatefrom" onchange="render()"></label>
+    <label>to <input type="date" id="fdateto" onchange="render()"></label>
   </div>
   <div class="toolbar" id="graph-toolbar" style="display:none">
     <label>min tag/entity strength
-      <input type="range" id="gminstrength" min="0" max="6" step="0.5" value="2"
+      <input type="range" id="gminstrength" min="0" max="7" step="0.5" value="3.5"
         oninput="onGraphStrengthChange()">
-      <span id="gminstrength-val">2.0</span>
+      <span id="gminstrength-val">3.5</span>
     </label>
     <button class="btn" onclick="resetGraphLayout()">Reset layout</button>
     <div class="legend">
@@ -344,6 +359,8 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
             <path d="M0,0 L10,5 L0,10 z" class="arrowhead"></path>
           </marker>
         </defs>
+        <circle id="globe-outline" class="globe-outline" cx="450" cy="280" r="200"></circle>
+        <line id="globe-equator" class="globe-equator" x1="250" y1="280" x2="650" y2="280"></line>
         <g id="graph-edges"></g>
         <g id="graph-nodes"></g>
       </svg>
@@ -377,7 +394,14 @@ function setMode(m) {
   document.getElementById('view-graph').style.display = m === 'graph' ? '' : 'none';
   if (m !== 'timeline') document.getElementById('activetag').style.display = 'none';
   render();
-  if (m === 'graph') ensureGraphInit();
+  if (m === 'graph') {
+    // ensureGraphInit() only ever runs its body once (first activation) and
+    // stages its own delayed spin-start; a RETURN visit later just needs
+    // the rotation loop resumed immediately, with no re-staging.
+    const wasInitialized = graphInitialized;
+    ensureGraphInit();
+    if (wasInitialized) ensureGlobeLoopRunning();
+  }
 }
 
 function setTag(value, roleName) {
@@ -400,6 +424,8 @@ function gotoCapture(id) {
   document.getElementById('ftype').value = '';
   document.getElementById('fvol').value = '';
   document.getElementById('fsrc').value = '';
+  document.getElementById('fdatefrom').value = '';
+  document.getElementById('fdateto').value = '';
   const cap = byId.get(id);
   if (cap && cap.superseded) document.getElementById('fsup').checked = true;
   state.tag = null; state.entity = null;
@@ -420,11 +446,15 @@ function filtered() {
   const fvol = document.getElementById('fvol').value;
   const fsrc = document.getElementById('fsrc').value;
   const fsup = document.getElementById('fsup').checked;
+  const dfrom = document.getElementById('fdatefrom').value;
+  const dto = document.getElementById('fdateto').value;
   return DATA.captures.filter(c => {
     if (!fsup && c.superseded) return false;
     if (ftype && c.type !== ftype) return false;
     if (fvol && String(c.volume) !== fvol) return false;
     if (fsrc && c.source !== fsrc) return false;
+    if (dfrom && c.date < dfrom) return false;
+    if (dto && c.date > dto) return false;
     if (state.tag && !c.tags.some(t => t.value === state.tag.value)) return false;
     if (state.entity && !state.entity.capture_ids.includes(c.id)) return false;
     if (q) {
@@ -590,13 +620,16 @@ function render() {
   // innerHTML replacement here, that would blow away node positions.
 }
 
-// ---- mode 4: force-directed graph ----
+// ---- mode 4: rotating globe ----
 //
-// A small hand-written simulation (no CDN dependency — "opens in any
-// browser, no network" rules that out). Weak tag-overlap edges are
-// excluded by default (adjustable via the strength slider), matching the
-// server's own traversal rule (connections.py _edge_map) — a graph where
-// every capture connects to hundreds of others is a hairball, not a graph.
+// A small hand-written spherical projection (no CDN dependency — "opens in
+// any browser, no network" rules that out). Each capture sits at a FIXED
+// point on a sphere — the most-connected capture is placed dead center of
+// the equator, the rest spiral outward from there by connection rank — and
+// the sphere slowly auto-rotates. Weak tag-overlap edges are excluded by
+// default (adjustable via the strength slider), matching the server's own
+// traversal rule (connections.py _edge_map) — a graph where every capture
+// connects to hundreds of others is a hairball, not a graph.
 
 function filterGraphEdges(edges, minStrength) {
   return edges.filter(e => e.type !== 'tag_overlap' || e.strength >= minStrength);
@@ -611,71 +644,18 @@ function computeDegrees(nodeIds, edges) {
   return deg;
 }
 
-function linkDistance(e) {
-  const base = e.type === 'asserted' ? 90 : e.type === 'reference' ? 110
-             : e.type === 'entity_overlap' ? 140 : 170;
-  return Math.max(base - (e.strength || 1) * 8, 40);
-}
-function linkStrengthFor(e) {
-  return (e.type === 'asserted' || e.type === 'reference') ? 0.12
-       : e.type === 'entity_overlap' ? 0.09 : 0.05;
-}
-
-const SIM = { charge: -900, centerStrength: 0.02, velocityDecay: 0.82, collidePad: 4 };
-
-// One physics tick. Pure with respect to its inputs except that it mutates
-// node positions/velocities in place (the standard force-simulation
-// pattern) — kept dependency-free so it can be unit-exercised directly.
-function simTick(nodes, links, cx, cy, alpha) {
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i], b = nodes[j];
-      let dx = b.x - a.x, dy = b.y - a.y;
-      let dist2 = dx * dx + dy * dy;
-      if (dist2 < 0.01) { dx = (Math.random() - 0.5) * 0.1; dy = (Math.random() - 0.5) * 0.1; dist2 = dx * dx + dy * dy; }
-      const dist = Math.sqrt(dist2);
-      const force = SIM.charge * alpha / dist2;
-      const fx = (dx / dist) * force, fy = (dy / dist) * force;
-      if (a.fx === undefined) { a.vx -= fx; a.vy -= fy; }
-      if (b.fx === undefined) { b.vx += fx; b.vy += fy; }
-      const minDist = (a.r || 6) + (b.r || 6) + SIM.collidePad;
-      if (dist < minDist) {
-        const overlap = (minDist - dist) * 0.5 * alpha;
-        const ox = (dx / dist) * overlap, oy = (dy / dist) * overlap;
-        if (a.fx === undefined) { a.x -= ox; a.y -= oy; }
-        if (b.fx === undefined) { b.x += ox; b.y += oy; }
-      }
-    }
-  }
-  for (const l of links) {
-    const a = l._s, b = l._t;
-    if (!a || !b) continue;
-    let dx = b.x - a.x, dy = b.y - a.y;
-    let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-    const target = linkDistance(l);
-    const strength = linkStrengthFor(l) * alpha;
-    const diff = (dist - target) / dist * strength;
-    const ox = dx * diff, oy = dy * diff;
-    if (a.fx === undefined) { a.vx += ox; a.vy += oy; }
-    if (b.fx === undefined) { b.vx -= ox; b.vy -= oy; }
-  }
-  for (const n of nodes) {
-    if (n.fx !== undefined) { n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; continue; }
-    n.vx += (cx - n.x) * SIM.centerStrength * alpha;
-    n.vy += (cy - n.y) * SIM.centerStrength * alpha;
-    n.vx *= SIM.velocityDecay;
-    n.vy *= SIM.velocityDecay;
-    n.x += n.vx;
-    n.y += n.vy;
-  }
-}
-
 const GRAPH_W = 900, GRAPH_H = 560, GRAPH_CX = GRAPH_W / 2, GRAPH_CY = GRAPH_H / 2;
+const GLOBE_R = 200;
+const GRAPH_DEFAULT_STRENGTH = 3.5;
+const GLOBE_SPIN_SPEED = 0.0035; // radians per frame — a slow, majestic turn
 let graphInitialized = false;
 let graphNodes = [], graphSimLinks = [];
-let graphAlpha = 1, graphAlphaTarget = 0, graphRunning = false;
 let graphSelected = null;
-let currentMinStrength = 2.0;
+let currentMinStrength = GRAPH_DEFAULT_STRENGTH;
+let globePositions = new Map(); // capture id -> {lat, lon}, fixed once computed
+let globeRotation = 0;
+let globeLoopRunning = false;
+let dragActive = false, dragStartX = 0, dragMoved = false, dragStartRotation = 0, dragNodeHit = null;
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -683,31 +663,57 @@ function svgEl(tag, attrs) {
   return el;
 }
 
-// Deterministic starting position, evenly spaced on a circle by index —
-// NOT random. The initial layout is a fixed, reproducible reference frame:
-// hitting Reset Layout always returns to the exact same arrangement (by
-// data order, i.e. chronological), rather than scattering to a new random
-// starting point every time. It also makes the settle-in animation land as
-// "structure emerging from order" instead of "noise becoming different
-// noise" — a much clearer before/after for a first-time viewer.
-function initialPos(index, total) {
-  const angle = (index / Math.max(total, 1)) * Math.PI * 2 - Math.PI / 2;
-  const radius = Math.min(180, 40 + total * 6);
-  return { x: GRAPH_CX + Math.cos(angle) * radius, y: GRAPH_CY + Math.sin(angle) * radius };
+// Deterministic sphere placement, ranked by connection count — NOT random.
+// The single most-connected capture sits at (lat=0, lon=0): dead center of
+// the equator, front-and-center at rotation=0. The rest spiral outward by
+// rank: remaining nodes alternate north/south hemispheres with latitude
+// magnitude growing with rank (so "distance from the equator" visually
+// encodes "how connected"), longitude spreads via the golden angle for
+// even coverage as the globe turns. Computed once and cached — the
+// strength slider changes which EDGES are visible, never where a capture
+// physically sits, so the sphere's shape stays a stable reference frame
+// across every interaction, matching Reset Layout's "static starting
+// point" principle.
+function computeGlobePositions(captures, degreeMap) {
+  const ranked = [...captures].sort((a, b) => (degreeMap.get(b.id) || 0) - (degreeMap.get(a.id) || 0));
+  const n = ranked.length;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const positions = new Map();
+  ranked.forEach((c, rank) => {
+    if (rank === 0) { positions.set(c.id, { lat: 0, lon: 0 }); return; }
+    const hemisphere = rank % 2 === 0 ? 1 : -1;
+    const band = Math.ceil(rank / 2) / Math.ceil(Math.max(n - 1, 1) / 2);
+    const lat = hemisphere * band * (Math.PI / 2) * 0.92;
+    const lon = golden * rank;
+    positions.set(c.id, { lat, lon });
+  });
+  return positions;
+}
+
+// Orthographic sphere -> 2D projection. depth is 0 (far side) .. 1 (near
+// side); used to scale/dim/reorder elements for the 3D illusion.
+function projectGlobe(pos, rotation) {
+  const lon = pos.lon + rotation;
+  const cosLat = Math.cos(pos.lat);
+  const x3d = GLOBE_R * cosLat * Math.sin(lon);
+  const y3d = GLOBE_R * Math.sin(pos.lat);
+  const z3d = GLOBE_R * cosLat * Math.cos(lon);
+  return { x: GRAPH_CX + x3d, y: GRAPH_CY - y3d, depth: (z3d / GLOBE_R + 1) / 2 };
 }
 
 function buildGraphData(minStrength) {
   currentMinStrength = minStrength;
   const filteredEdges = filterGraphEdges(DATA.edges, minStrength);
   const degrees = computeDegrees(DATA.captures.map(c => c.id), filteredEdges);
-  const prevById = new Map(graphNodes.map(n => [n.id, n]));
-  graphNodes = DATA.captures.map((c, i) => {
-    const prev = prevById.get(c.id);
+  if (globePositions.size === 0) {
+    const fullDegrees = computeDegrees(DATA.captures.map(c => c.id), DATA.edges);
+    globePositions = computeGlobePositions(DATA.captures, fullDegrees);
+  }
+  graphNodes = DATA.captures.map(c => {
     const deg = degrees.get(c.id) || 0;
     const r = Math.max(5, Math.min(16, 5 + deg * 1.3));
-    if (prev) { prev.r = r; prev.deg = deg; return prev; }
-    const p = initialPos(i, DATA.captures.length);
-    return { id: c.id, x: p.x, y: p.y, vx: 0, vy: 0, r, deg, cap: c };
+    const pos = globePositions.get(c.id);
+    return { id: c.id, lat: pos.lat, lon: pos.lon, r, deg, cap: c };
   });
   const nodeById = new Map(graphNodes.map(n => [n.id, n]));
   graphSimLinks = filteredEdges
@@ -760,9 +766,17 @@ function graphSummaryHtml() {
   const s = summarizeGraph(nodes, links);
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
+  const dates = nodes.map(n => n.cap.date).filter(Boolean).sort();
+  const timeSpan = dates.length
+    ? (dates[0] === dates[dates.length - 1]
+        ? `All from ${dates[0]}.`
+        : `Captures span ${dates[0]} to ${dates[dates.length - 1]}.`)
+    : '';
+
   const sentences = [
     `${plural(total, 'capture')}, ${plural(links.length, 'connection')} shown at strength ≥ ${currentMinStrength.toFixed(1)}.`,
   ];
+  if (timeSpan) sentences.push(timeSpan);
 
   const typeBits = [];
   if (s.counts.reference) typeBits.push(plural(s.counts.reference, 'reference'));
@@ -782,7 +796,7 @@ function graphSummaryHtml() {
     sentences.push(`${plural(s.isolated.length, 'capture')} isolated at this threshold.`);
   }
   if (s.topNode && (s.degreeMap.get(s.topNode.id) || 0) > 0) {
-    sentences.push(`Most connected: <span class="tid">${esc(label(s.topNode.cap))}</span> `
+    sentences.push(`Most connected (equator center): <span class="tid">${esc(label(s.topNode.cap))}</span> `
       + `(${plural(s.degreeMap.get(s.topNode.id), 'connection')}).`);
   }
   return sentences.join(' ');
@@ -805,6 +819,7 @@ function renderGraphStructure() {
     const directional = l.type === 'reference' || l.type === 'asserted';
     const line = svgEl('line', { class: `edge e-${l.type}${relationClass(l)}` });
     if (directional) line.setAttribute('marker-end', 'url(#arrow)');
+    line._link = l;
     edgesG.appendChild(line);
   }
   nodesG.innerHTML = '';
@@ -821,7 +836,7 @@ function renderGraphStructure() {
       text.textContent = label(c);
       g.appendChild(text);
     }
-    g.addEventListener('pointerdown', ev => onNodePointerDown(ev, n));
+    g._node = n;
     g.addEventListener('pointerenter', () => showGraphTooltip(n));
     g.addEventListener('pointerleave', hideGraphTooltip);
     nodesG.appendChild(g);
@@ -830,32 +845,57 @@ function renderGraphStructure() {
   renderGraphSummary();
 }
 
+// Projects every node/edge to its current screen position and re-orders the
+// DOM back-to-front (appendChild on an already-attached element moves it,
+// no removal/recreation needed) so nearer elements draw over farther ones —
+// without this the sphere illusion breaks the moment two elements overlap
+// in the wrong z-order. Each element carries its data via a direct property
+// (_node / _link) rather than array-index correspondence, because the
+// reordering itself changes DOM order every single frame.
 function renderGraphPositions() {
-  const edgeEls = document.getElementById('graph-edges').children;
-  for (let i = 0; i < graphSimLinks.length; i++) {
-    const l = graphSimLinks[i], el = edgeEls[i];
-    el.setAttribute('x1', l._s.x); el.setAttribute('y1', l._s.y);
-    el.setAttribute('x2', l._t.x); el.setAttribute('y2', l._t.y);
+  const nodesG = document.getElementById('graph-nodes');
+  const edgesG = document.getElementById('graph-edges');
+  if (!nodesG || !edgesG) return; // graph host was replaced (empty-state message)
+
+  const proj = new Map(graphNodes.map(n => [n.id, projectGlobe({ lat: n.lat, lon: n.lon }, globeRotation)]));
+
+  const nodeOrder = [...nodesG.children]
+    .map(el => ({ el, p: proj.get(el._node.id) }))
+    .sort((a, b) => a.p.depth - b.p.depth);
+  for (const { el, p } of nodeOrder) {
+    const scale = 0.5 + p.depth * 0.6;
+    el.setAttribute('transform', `translate(${p.x},${p.y}) scale(${scale})`);
+    el.style.opacity = String(0.3 + p.depth * 0.7);
+    nodesG.appendChild(el);
   }
-  const nodeEls = document.getElementById('graph-nodes').children;
-  for (let i = 0; i < graphNodes.length; i++) {
-    nodeEls[i].setAttribute('transform', `translate(${graphNodes[i].x},${graphNodes[i].y})`);
+
+  const edgeOrder = [...edgesG.children]
+    .map(el => {
+      const l = el._link;
+      const ps = proj.get(l._s.id), pt = proj.get(l._t.id);
+      return { el, ps, pt, depth: (ps.depth + pt.depth) / 2 };
+    })
+    .sort((a, b) => a.depth - b.depth);
+  for (const { el, ps, pt, depth } of edgeOrder) {
+    el.setAttribute('x1', ps.x); el.setAttribute('y1', ps.y);
+    el.setAttribute('x2', pt.x); el.setAttribute('y2', pt.y);
+    el.style.opacity = String(0.1 + depth * 0.7);
+    edgesG.appendChild(el);
   }
 }
 
-function kickGraphSim(a) {
-  graphAlpha = Math.max(graphAlpha, a);
-  if (!graphRunning) { graphRunning = true; requestAnimationFrame(stepGraphSim); }
+function ensureGlobeLoopRunning() {
+  if (globeLoopRunning || !DATA.captures.length) return;
+  globeLoopRunning = true;
+  requestAnimationFrame(stepGlobe);
 }
-function stepGraphSim() {
-  graphAlpha += (graphAlphaTarget - graphAlpha) * 0.05;
-  simTick(graphNodes, graphSimLinks, GRAPH_CX, GRAPH_CY, Math.max(graphAlpha, 0));
-  renderGraphPositions();
-  if (graphAlpha > 0.001 || graphAlphaTarget > 0) {
-    requestAnimationFrame(stepGraphSim);
-  } else {
-    graphRunning = false;
+function stepGlobe() {
+  if (state.mode !== 'graph') { globeLoopRunning = false; return; }
+  if (!dragActive && graphSelected === null && !prefersReducedMotion) {
+    globeRotation += GLOBE_SPIN_SPEED;
   }
+  renderGraphPositions();
+  requestAnimationFrame(stepGlobe);
 }
 
 function ensureGraphInit() {
@@ -866,22 +906,14 @@ function ensureGraphInit() {
     host.innerHTML = '<div class="empty">No captures yet — nothing to graph.</div>';
     return;
   }
-  buildGraphData(2.0);
+  buildGraphData(GRAPH_DEFAULT_STRENGTH);
   wireGraphInteraction();
-  if (prefersReducedMotion) {
-    for (let i = 0; i < 300; i++) {
-      simTick(graphNodes, graphSimLinks, GRAPH_CX, GRAPH_CY, Math.max(1 - i / 300, 0));
-    }
-    graphAlpha = 0;
-    renderGraphStructure();
-  } else {
-    // Show the clean starting circle and hold it for a beat before the
-    // simulation begins — a deliberate pause so the viewer registers "here
-    // is my data" before watching it reorganize into clusters, rather than
-    // motion starting mid-glance at an already-scrambled layout.
-    renderGraphStructure();
-    setTimeout(() => kickGraphSim(1), 400);
-  }
+  renderGraphStructure();
+  if (prefersReducedMotion) return; // static globe; drag-to-rotate still works
+  // Hold the initial static view — most-connected capture front and center
+  // on the equator — for a beat before the slow spin begins, so the viewer
+  // registers "here is my data" before watching it turn.
+  setTimeout(ensureGlobeLoopRunning, 400);
 }
 
 function onGraphStrengthChange() {
@@ -890,33 +922,25 @@ function onGraphStrengthChange() {
   buildGraphData(v);
   clearGraphSelection();
   renderGraphStructure();
-  // One-off boost only. graphAlphaTarget stays at its resting 0, so the
-  // decay formula in stepGraphSim pulls alpha back down and the loop
-  // terminates on its own — leaving alphaTarget elevated here (as an
-  // earlier version of this code did) meant the "alpha > 0.001 ||
-  // alphaTarget > 0" stop condition was never satisfied and the layout
-  // churned forever until Reset Layout happened to zero the target.
-  kickGraphSim(0.5);
 }
 
 function resetGraphLayout() {
-  // Same deterministic circle initialPos() computes on first build — index
-  // order matches graphNodes' order 1:1 since buildGraphData always rebuilds
-  // it fresh from DATA.captures in that fixed order. Every reset returns to
-  // this exact same starting arrangement, not a new random one.
-  graphNodes.forEach((n, i) => {
-    delete n.fx; delete n.fy;
-    const p = initialPos(i, graphNodes.length);
-    n.x = p.x; n.y = p.y; n.vx = 0; n.vy = 0;
-  });
+  // Resets the VIEW, not the data: rotation returns to 0 (most-connected
+  // capture front-and-center again) and the strength slider returns to its
+  // default. globePositions is deliberately NOT recomputed here — which
+  // capture sits where on the sphere is a stable structural fact, not
+  // something a "reset layout" click should ever reshuffle.
+  document.getElementById('gminstrength').value = String(GRAPH_DEFAULT_STRENGTH);
+  document.getElementById('gminstrength-val').textContent = GRAPH_DEFAULT_STRENGTH.toFixed(1);
+  buildGraphData(GRAPH_DEFAULT_STRENGTH);
+  globeRotation = 0;
   clearGraphSelection();
-  graphAlphaTarget = 0;
-  kickGraphSim(1);
+  renderGraphStructure();
+  ensureGlobeLoopRunning();
 }
 
-// ---- graph interaction: hover tooltip, click-to-inspect, drag ----
-
-let dragNode = null, dragStart = null, dragMoved = false;
+// ---- graph interaction: drag anywhere to spin the globe; a stationary
+// click on a node selects it, on empty space deselects ----
 
 function svgPoint(evt) {
   const svg = document.getElementById('graph-svg');
@@ -928,54 +952,43 @@ function svgPoint(evt) {
   return { x: p.x, y: p.y };
 }
 
-function onNodePointerDown(ev, n) {
-  ev.stopPropagation();
-  dragNode = n; dragMoved = false;
-  dragStart = svgPoint(ev);
+function findNodeAt(target) {
+  let el = target;
+  while (el && !el._node) el = el.parentNode;
+  return el ? el._node : null;
+}
+
+function onSvgPointerDown(ev) {
+  dragActive = true; dragMoved = false;
+  dragNodeHit = findNodeAt(ev.target);
+  dragStartX = svgPoint(ev).x;
+  dragStartRotation = globeRotation;
   document.getElementById('graph-svg').setPointerCapture(ev.pointerId);
-  // Deliberately do NOT pin the node or kick the simulation here — that
-  // used to happen on every pointerdown, so a plain inspection click
-  // jostled the layout before we even knew whether it was a click or a
-  // drag. Both now happen only once real movement is detected, in
-  // onSvgPointerMove below.
 }
 function onSvgPointerMove(ev) {
-  if (!dragNode) return;
-  const p = svgPoint(ev);
-  if (!dragMoved && (Math.abs(p.x - dragStart.x) > 2 || Math.abs(p.y - dragStart.y) > 2)) {
-    dragMoved = true;
-    dragNode.fx = dragNode.x; dragNode.fy = dragNode.y;
-    graphAlphaTarget = 0.4;
-    kickGraphSim(0.4);
+  if (!dragActive) return;
+  const x = svgPoint(ev).x;
+  const dx = x - dragStartX;
+  if (!dragMoved && Math.abs(dx) > 2) dragMoved = true;
+  if (dragMoved) {
+    globeRotation = dragStartRotation + dx * 0.01;
+    renderGraphPositions();
   }
-  if (dragMoved) { dragNode.fx = p.x; dragNode.fy = p.y; }
 }
 function onSvgPointerUp() {
-  if (!dragNode) return;
-  if (dragMoved) {
-    // Real drag: cool the simulation back down toward its resting alpha
-    // target of 0; the node stays pinned where it was dropped so the
-    // manual arrangement persists until Reset Layout.
-    graphAlphaTarget = 0;
-  } else {
-    // Plain click: pure selection, zero physics side effects.
-    selectGraphNode(dragNode);
+  if (!dragActive) return;
+  dragActive = false;
+  if (!dragMoved) {
+    if (dragNodeHit) selectGraphNode(dragNodeHit);
+    else clearGraphSelection();
   }
-  dragNode = null;
+  dragNodeHit = null;
+  ensureGlobeLoopRunning();
 }
 
 function wireGraphInteraction() {
   const svg = document.getElementById('graph-svg');
-  // Background-click clearing is deliberately wired on 'pointerdown', not
-  // 'click'. A node's pointerdown calls stopPropagation(), so this handler
-  // only ever fires for pointerdowns that land on genuinely empty canvas.
-  // A 'click' listener looked equivalent but was not: setPointerCapture()
-  // during a node interaction (above) retargets the synthetic click event
-  // that follows pointerup to the svg element itself, so a 'click'-based
-  // check here would immediately clear the selection selectGraphNode()
-  // had just set on the very same interaction — the info panel would
-  // flash and disappear on every node click.
-  svg.addEventListener('pointerdown', clearGraphSelection);
+  svg.addEventListener('pointerdown', onSvgPointerDown);
   svg.addEventListener('pointermove', onSvgPointerMove);
   svg.addEventListener('pointerup', onSvgPointerUp);
 }
@@ -988,12 +1001,11 @@ function selectGraphNode(n) {
     if (l._t.id === n.id) neighborIds.add(l._s.id);
   }
   for (const el of document.getElementById('graph-nodes').children) {
-    el.classList.toggle('dimmed', !neighborIds.has(Number(el.getAttribute('data-id'))));
+    el.classList.toggle('dimmed', !neighborIds.has(el._node.id));
   }
-  const edgeEls = document.getElementById('graph-edges').children;
-  for (let i = 0; i < graphSimLinks.length; i++) {
-    const l = graphSimLinks[i];
-    edgeEls[i].classList.toggle('dimmed', l._s.id !== n.id && l._t.id !== n.id);
+  for (const el of document.getElementById('graph-edges').children) {
+    const l = el._link;
+    el.classList.toggle('dimmed', l._s.id !== n.id && l._t.id !== n.id);
   }
   showGraphPanel(n);
 }
@@ -1024,8 +1036,9 @@ function showGraphTooltip(n) {
   tip.textContent = label(n.cap);
   const svg = document.getElementById('graph-svg');
   const rect = svg.getBoundingClientRect();
-  tip.style.left = (n.x * (rect.width / GRAPH_W)) + 'px';
-  tip.style.top = (n.y * (rect.height / GRAPH_H)) + 'px';
+  const p = projectGlobe({ lat: n.lat, lon: n.lon }, globeRotation);
+  tip.style.left = (p.x * (rect.width / GRAPH_W)) + 'px';
+  tip.style.top = (p.y * (rect.height / GRAPH_H)) + 'px';
 }
 function hideGraphTooltip() { document.getElementById('graph-tooltip').hidden = true; }
 

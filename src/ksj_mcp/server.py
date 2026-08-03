@@ -1263,12 +1263,15 @@ def export_html(file_path: str = "") -> str:
                     relations always shown, tag/entity overlap only above
                     strength 2.0 so a well-tagged capture doesn't drown in
                     weak matches.
-      Graph       — force-directed visualization of the whole connection
-                    graph: click a node to see its neighborhood and jump to
-                    it, drag to rearrange, adjust the strength slider to
-                    reveal or hide weaker tag/entity connections. A plain-
-                    language summary above the graph describes what's
-                    shown (capture/connection counts, clusters, isolated
+      Graph       — a slowly rotating globe of the whole connection graph:
+                    the most-connected capture sits dead center of the
+                    equator, everything else spirals outward by connection
+                    rank. Drag to spin it, click a node to see its
+                    neighborhood and jump to it, adjust the strength slider
+                    to reveal or hide weaker tag/entity connections. A
+                    plain-language summary above the graph — including the
+                    time span of what's shown — describes what's currently
+                    visible (capture/connection counts, clusters, isolated
                     captures, most-connected capture) and updates live as
                     the threshold changes.
 
