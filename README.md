@@ -1,5 +1,7 @@
 # KSJ MCP Server
 
+<img src="docs/cover.jpg" alt="Knowledge Synthesis Journal v2.0 cover" width="265" height="342" align="right">
+
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
