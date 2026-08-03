@@ -2,7 +2,7 @@
 KSJ MCP Server — FastMCP entry point.
 
 28 tools:
-  export_html        — Self-contained HTML view: timeline + tag/entity index
+  export_html        — Self-contained HTML view: timeline, index, connections, graph
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
   neighborhood       — Everything within N hops of a capture
@@ -1249,13 +1249,24 @@ def export_html(file_path: str = "") -> str:
     browser for the whole journal that opens in any web browser, works
     offline, and needs no install.
 
-    Two overview modes:
-      Timeline — every capture chronologically, with live search and
-                 type / volume / journal-vs-AI filters; superseded captures
-                 hidden behind a toggle.
-      Index    — tags grouped by meaning (topics, dream themes, open
-                 questions, insights, motifs, sensory details) plus the
-                 entity register; every entry click-filters the timeline.
+    Four overview modes:
+      Timeline    — every capture chronologically, with live search and
+                    type / volume / journal-vs-AI filters; superseded
+                    captures hidden behind a toggle. Each card also lists
+                    its connections (mode 3) — click one to jump to the
+                    connected capture.
+      Index       — tags grouped by meaning (topics, dream themes, open
+                    questions, insights, motifs, sensory details) plus the
+                    entity register; every entry click-filters the timeline.
+      Connections — (mode 3, built into every Timeline card, not a separate
+                    tab) typed, directional links — references and asserted
+                    relations always shown, tag/entity overlap only above
+                    strength 2.0 so a well-tagged capture doesn't drown in
+                    weak matches.
+      Graph       — force-directed visualization of the whole connection
+                    graph: click a node to see its neighborhood and jump to
+                    it, drag to rearrange, adjust the strength slider to
+                    reveal or hide weaker tag/entity connections.
 
     All data is inlined in the file: sharing or archiving the file shares a
     snapshot of the knowledge base.

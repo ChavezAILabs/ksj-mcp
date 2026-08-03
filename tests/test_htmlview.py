@@ -1,10 +1,11 @@
 """
-Tests for the self-contained HTML view (§2.4a modes 1–2).
+Tests for the self-contained HTML view (§2.4a modes 1-4).
 """
 
 import json
 
-from ksj_mcp.database import insert_capture, insert_tags, link_capture_entity
+from ksj_mcp.connections import build_connections
+from ksj_mcp.database import insert_capture, insert_tags, link_capture_entity, insert_connection
 from ksj_mcp.htmlview import collect_view_data, render_html
 
 
@@ -55,6 +56,34 @@ class TestCollectViewData:
         assert ents[0]["name"] == "Veronica"
         assert ents[0]["capture_ids"] == [cid]
 
+    def test_edges_shape(self, db):
+        """One flat edge list — modes 3/4 both derive per-capture or graph
+        views from this client-side rather than getting duplicated data."""
+        a = _cap(db, "RC-001", raw="see @RC-002")
+        b = _cap(db, "RC-002", raw="referenced page")
+        build_connections(db, a)
+        edges = collect_view_data(db)["edges"]
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["source"] == a
+        assert e["target"] == b
+        assert e["type"] == "reference"
+        assert e["strength"] == 1.0
+
+    def test_asserted_edge_carries_relation_and_note(self, db):
+        a = _cap(db, "RC-001")
+        b = _cap(db, "RC-002")
+        insert_connection(db, a, b, "asserted", 1.0, "asserted",
+                          relation="supports", note="because", asserted_by="user")
+        db.commit()
+        edges = collect_view_data(db)["edges"]
+        assert edges[0]["relation"] == "supports"
+        assert edges[0]["note"] == "because"
+
+    def test_no_edges_when_none_exist(self, db):
+        _cap(db, "RC-001")
+        assert collect_view_data(db)["edges"] == []
+
 
 class TestRenderHtml:
     def test_contains_data(self, db):
@@ -79,3 +108,18 @@ class TestRenderHtml:
         payload = html[start:end].replace("<\\/", "</")
         data = json.loads(payload)
         assert data["captures"][0]["template_id"] == "RC-001"
+
+    def test_graph_tab_and_containers_present(self, db):
+        _cap(db, "RC-001")
+        html = render_html(collect_view_data(db))
+        assert 'id="tab-graph"' in html
+        assert 'id="graph-svg"' in html
+        assert 'id="view-graph"' in html
+
+    def test_connections_section_present_in_card_markup(self, db):
+        _cap(db, "RC-001")
+        html = render_html(collect_view_data(db))
+        # the connectionsSectionHtml() call site, not per-capture output
+        # (that's rendered client-side) — just confirm the hook is wired in
+        assert "connectionsSectionHtml" in html
+        assert 'class="connections"' in html
