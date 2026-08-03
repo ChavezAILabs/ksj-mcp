@@ -51,6 +51,41 @@ Spend an hour going deep on a topic with an AI assistant and most of that thinki
 
 Each insight is confidence-scored (🟢 Seed / 🔴 Developing / 🟡 Strong) and shown to you for review before anything is written to the database. Approved entries are stored alongside your journal captures with full tag support, so AI-extracted insights surface in searches, connection graphs, and synthesis suggestions alongside your handwritten notes.
 
+### AI companions — an independent check on what you already wrote
+
+Three pairs of tools go a step further than search and connections: each runs
+an independent AI pass against a page **you've already written by hand**,
+then walks you through what it found before anything gets stored. Same shape
+every time — **scan → structured dialogue → your approval → a separate
+AI-Extracted entry.** Your original page is never rewritten.
+
+- **Synthesis.** `surface_connections` re-derives connections across the RC
+  cluster behind a SYN page — blind to what the page itself says — then
+  compares its independent read against yours: what you both found, what it
+  caught that you missed, what you saw that no tag overlap could have
+  surfaced. `commit_distillation` stores what the comparison revealed once
+  you approve it, linked to the SYN page with a `distills` edge.
+- **Review.** `audit_knowledge_status` checks a claimed Knowledge Status
+  (Solid / Mastered) against real evidence still sitting in the journal —
+  open questions and uncited insights on that topic. `commit_assessment`
+  records the outcome with an `assesses` edge; your REV page's claimed
+  status is never rewritten — a real status change only ever happens on a
+  future hand-written page.
+- **Dream Capture.** `dream_correlation` reports plain co-occurrence between
+  dream entries and your waking entries — deliberately labeled
+  *co-occurrence, not correlation*, with the window size, match count, and
+  base rate always shown, since a small journal can make anything look
+  meaningful. `bridge_dream_research` builds on it with a dialogue about
+  what a dream's symbols mean to you, and `commit_observation` stores the
+  outcome with an `observes` edge — called an *observation*, not an
+  inference, because that's what a journal this size can actually support.
+
+Every one of these runs **after** the physical page exists, never before —
+running the check first would let the AI perform the thinking the physical
+practice exists to force. None has an override flag for that precondition,
+and the dialogues themselves are built to ask, not propose: a question makes
+you think; a suggested answer makes the AI think, in your place.
+
 **Local by default.** Storage, search, and connections all live in a SQLite
 database on your machine — nothing is synced or hosted anywhere. When your AI
 assistant reads a journal photo with vision, that image is handled by your
@@ -222,10 +257,22 @@ Once connected, talk to your AI assistant naturally.
 
 > "How is my understanding of #linear-algebra progressing?"
 
+> "Run surface_connections on SYN-004" → independent scan of the RC cluster
+> behind it, then a dialogue comparing what it found against what you wrote
+
+> "Audit REV-008 against the evidence" → checks its claimed Knowledge Status
+> against open questions and uncited insights still sitting on that topic
+
 **Dream Capture:**
 > "What symbols and themes keep appearing in my dreams?"
 
 > "Show me all my dream entries from this month"
+
+> "Does #flying show up near any of my waking entries?" → plain co-occurrence
+> counts, always with the window, match count, and base rate shown
+
+> "Bridge DC-005 to my research" → checks for cross-domain echo, then asks
+> what the dream's symbols mean to you (never proposes an interpretation)
 
 **Export & health:**
 > "Export all captures tagged #ai as Markdown"
