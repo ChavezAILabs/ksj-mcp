@@ -352,7 +352,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
     <label>to <input type="date" id="fdateto" onchange="render()"></label>
   </div>
   <div class="toolbar" id="graph-toolbar" style="display:none">
-    <label>min tag/entity strength
+    <label>min tag-overlap strength
       <input type="range" id="gminstrength" min="0" max="7" step="0.5" value="3.5"
         oninput="onGraphStrengthChange()">
       <span id="gminstrength-val">3.5</span>
