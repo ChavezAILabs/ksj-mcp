@@ -1266,7 +1266,11 @@ def export_html(file_path: str = "") -> str:
       Graph       — force-directed visualization of the whole connection
                     graph: click a node to see its neighborhood and jump to
                     it, drag to rearrange, adjust the strength slider to
-                    reveal or hide weaker tag/entity connections.
+                    reveal or hide weaker tag/entity connections. A plain-
+                    language summary above the graph describes what's
+                    shown (capture/connection counts, clusters, isolated
+                    captures, most-connected capture) and updates live as
+                    the threshold changes.
 
     All data is inlined in the file: sharing or archiving the file shares a
     snapshot of the knowledge base.

@@ -8,6 +8,10 @@ Overview modes ship in stages, gated only by the data each needs:
            edges as clickable links (no spatial layout, just adjacency).
   Mode 4 — Graph: force-directed visualization, gated on edge quality and
            typed edges (server 3.0/3.1) so it never renders a hairball.
+           Starts from a fixed circular layout (not random — Reset Layout
+           always returns to the same arrangement) and settles into place;
+           a plain-language summary above the graph describes what's
+           currently shown and updates as the strength threshold changes.
 
 One .html file, all data inlined as JSON, vanilla JS/CSS, no network access,
 no build step, opens in any browser. Everything user-authored is escaped
@@ -270,6 +274,8 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .edge.e-entity_overlap { stroke: var(--accent); stroke-opacity: .45; stroke-width: 1.3; }
 .edge.e-tag_overlap { stroke: var(--muted); stroke-opacity: .3; stroke-width: 1; }
 .edge.dimmed { stroke-opacity: .08 !important; }
+.graph-summary { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 14px; margin-bottom: 10px; font-size: .86rem; color: var(--ink); line-height: 1.6; }
 .graph-tooltip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
   font-size: .76rem; padding: 4px 8px; border-radius: 6px; transform: translate(-50%, -130%);
   white-space: nowrap; z-index: 5; }
@@ -329,6 +335,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
     <div id="view-timeline"></div>
     <div id="view-index" style="display:none"></div>
     <div id="view-graph" style="display:none">
+      <div id="graph-summary" class="graph-summary"></div>
       <svg id="graph-svg" viewBox="0 0 900 560" preserveAspectRatio="xMidYMid meet"
         aria-label="Connection graph">
         <defs>
@@ -668,6 +675,7 @@ let graphInitialized = false;
 let graphNodes = [], graphSimLinks = [];
 let graphAlpha = 1, graphAlphaTarget = 0, graphRunning = false;
 let graphSelected = null;
+let currentMinStrength = 2.0;
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -675,28 +683,114 @@ function svgEl(tag, attrs) {
   return el;
 }
 
-function randomPos() {
-  const angle = Math.random() * Math.PI * 2;
-  const radius = 60 + Math.random() * 180;
+// Deterministic starting position, evenly spaced on a circle by index —
+// NOT random. The initial layout is a fixed, reproducible reference frame:
+// hitting Reset Layout always returns to the exact same arrangement (by
+// data order, i.e. chronological), rather than scattering to a new random
+// starting point every time. It also makes the settle-in animation land as
+// "structure emerging from order" instead of "noise becoming different
+// noise" — a much clearer before/after for a first-time viewer.
+function initialPos(index, total) {
+  const angle = (index / Math.max(total, 1)) * Math.PI * 2 - Math.PI / 2;
+  const radius = Math.min(180, 40 + total * 6);
   return { x: GRAPH_CX + Math.cos(angle) * radius, y: GRAPH_CY + Math.sin(angle) * radius };
 }
 
 function buildGraphData(minStrength) {
+  currentMinStrength = minStrength;
   const filteredEdges = filterGraphEdges(DATA.edges, minStrength);
   const degrees = computeDegrees(DATA.captures.map(c => c.id), filteredEdges);
   const prevById = new Map(graphNodes.map(n => [n.id, n]));
-  graphNodes = DATA.captures.map(c => {
+  graphNodes = DATA.captures.map((c, i) => {
     const prev = prevById.get(c.id);
     const deg = degrees.get(c.id) || 0;
     const r = Math.max(5, Math.min(16, 5 + deg * 1.3));
     if (prev) { prev.r = r; prev.deg = deg; return prev; }
-    const p = randomPos();
+    const p = initialPos(i, DATA.captures.length);
     return { id: c.id, x: p.x, y: p.y, vx: 0, vy: 0, r, deg, cap: c };
   });
   const nodeById = new Map(graphNodes.map(n => [n.id, n]));
   graphSimLinks = filteredEdges
     .map(e => ({ ...e, _s: nodeById.get(e.source), _t: nodeById.get(e.target) }))
     .filter(l => l._s && l._t);
+}
+
+// ---- graph summary text: a plain-language description of what's on
+// screen right now, recomputed whenever the strength threshold changes ----
+
+function computeComponents(nodeIds, edges) {
+  const parent = new Map(nodeIds.map(id => [id, id]));
+  function find(x) {
+    while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+    return x;
+  }
+  function union(a, b) { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); }
+  for (const e of edges) union(e.source, e.target);
+  const groups = new Map();
+  for (const id of nodeIds) {
+    const root = find(id);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(id);
+  }
+  return [...groups.values()];
+}
+
+function summarizeGraph(nodes, links) {
+  const counts = { reference: 0, entity_overlap: 0, tag_overlap: 0,
+    supersedes: 0, refutes: 0, narrows: 0, supports: 0 };
+  for (const l of links) {
+    if (l.type === 'asserted') counts[l.relation] = (counts[l.relation] || 0) + 1;
+    else counts[l.type] = (counts[l.type] || 0) + 1;
+  }
+  const degreeMap = computeDegrees(nodes.map(n => n.id), links);
+  const isolated = nodes.filter(n => (degreeMap.get(n.id) || 0) === 0);
+  const components = computeComponents(nodes.map(n => n.id), links);
+  const largest = components.reduce((a, b) => (b.length > a.length ? b : a), []);
+  const topNode = nodes.reduce(
+    (best, n) => (degreeMap.get(n.id) || 0) > (best ? (degreeMap.get(best.id) || 0) : -1) ? n : best,
+    null
+  );
+  return { counts, isolated, components, largest, topNode, degreeMap };
+}
+
+function graphSummaryHtml() {
+  const nodes = graphNodes, links = graphSimLinks;
+  const total = nodes.length;
+  if (!total) return 'No captures to show.';
+  const s = summarizeGraph(nodes, links);
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+  const sentences = [
+    `${plural(total, 'capture')}, ${plural(links.length, 'connection')} shown at strength ≥ ${currentMinStrength.toFixed(1)}.`,
+  ];
+
+  const typeBits = [];
+  if (s.counts.reference) typeBits.push(plural(s.counts.reference, 'reference'));
+  if (s.counts.entity_overlap) typeBits.push(plural(s.counts.entity_overlap, 'entity overlap'));
+  if (s.counts.tag_overlap) typeBits.push(plural(s.counts.tag_overlap, 'tag overlap'));
+  const relBits = ['supersedes', 'refutes', 'narrows', 'supports']
+    .filter(r => s.counts[r]).map(r => `${s.counts[r]} ${r}`);
+  if (relBits.length) typeBits.push(`asserted (${relBits.join(', ')})`);
+  if (typeBits.length) sentences.push(typeBits.join(' · ') + '.');
+
+  if (links.length) {
+    sentences.push(s.components.length > 1
+      ? `Forms ${s.components.length} separate clusters — largest has ${plural(s.largest.length, 'capture')}.`
+      : 'All connected captures form a single cluster.');
+  }
+  if (s.isolated.length) {
+    sentences.push(`${plural(s.isolated.length, 'capture')} isolated at this threshold.`);
+  }
+  if (s.topNode && (s.degreeMap.get(s.topNode.id) || 0) > 0) {
+    sentences.push(`Most connected: <span class="tid">${esc(label(s.topNode.cap))}</span> `
+      + `(${plural(s.degreeMap.get(s.topNode.id), 'connection')}).`);
+  }
+  return sentences.join(' ');
+}
+
+function renderGraphSummary() {
+  const el = document.getElementById('graph-summary');
+  if (el) el.innerHTML = graphSummaryHtml();
 }
 
 function relationClass(e) {
@@ -733,6 +827,7 @@ function renderGraphStructure() {
     nodesG.appendChild(g);
   }
   renderGraphPositions();
+  renderGraphSummary();
 }
 
 function renderGraphPositions() {
@@ -780,8 +875,12 @@ function ensureGraphInit() {
     graphAlpha = 0;
     renderGraphStructure();
   } else {
+    // Show the clean starting circle and hold it for a beat before the
+    // simulation begins — a deliberate pause so the viewer registers "here
+    // is my data" before watching it reorganize into clusters, rather than
+    // motion starting mid-glance at an already-scrambled layout.
     renderGraphStructure();
-    kickGraphSim(1);
+    setTimeout(() => kickGraphSim(1), 400);
   }
 }
 
@@ -801,11 +900,15 @@ function onGraphStrengthChange() {
 }
 
 function resetGraphLayout() {
-  for (const n of graphNodes) {
+  // Same deterministic circle initialPos() computes on first build — index
+  // order matches graphNodes' order 1:1 since buildGraphData always rebuilds
+  // it fresh from DATA.captures in that fixed order. Every reset returns to
+  // this exact same starting arrangement, not a new random one.
+  graphNodes.forEach((n, i) => {
     delete n.fx; delete n.fy;
-    const p = randomPos();
+    const p = initialPos(i, graphNodes.length);
     n.x = p.x; n.y = p.y; n.vx = 0; n.vy = 0;
-  }
+  });
   clearGraphSelection();
   graphAlphaTarget = 0;
   kickGraphSim(1);
