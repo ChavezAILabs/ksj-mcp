@@ -29,6 +29,7 @@ from ksj_mcp.database import (
     insert_tags,
     link_capture_entity,
     migrate_v3,
+    migrate_v31,
     search_fts,
     set_setting,
 )
@@ -363,6 +364,7 @@ class TestMigrateV3:
     def test_full_migration(self, tmp_path):
         db_path = self._make_v2_db(tmp_path)
         assert migrate_v3(db_path) is True
+        migrate_v31(db_path)  # startup chain — search helpers assume v3.1 columns
 
         con = get_connection(db_path)
         cols = {r[1] for r in con.execute("PRAGMA table_info(captures)").fetchall()}

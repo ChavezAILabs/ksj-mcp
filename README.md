@@ -247,7 +247,13 @@ Once connected, talk to your AI assistant naturally.
 | `bulk_upload` | Process a whole folder of photos at once (local OCR) |
 | `set_volume` | Multiple journals: set which book new captures go into and which books search sees |
 | `assert_entity` | Link a named entity (person, place, work, dream symbol) to a capture |
-| `rebuild_connections` | Re-derive the whole connection graph from current tags and text |
+| `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports another — superseded claims are kept in history but leave current search |
+| `rebuild_connections` | Re-derive the connection graph from current tags and text (asserted edges are never touched) |
+| `find_path` | Shortest chain of connections between two captures |
+| `neighborhood` | Everything within N hops of a capture — its local knowledge cluster |
+| `lint` | Health check: orphan captures, un-closed superseded claims, unresolved contradictions, stale open questions, fragmented tags |
+| `export_backup` | Full knowledge base to a versioned JSONL file ([format doc](docs/EXPORT_FORMAT.md)) |
+| `import_backup` | Restore a JSONL backup — additive, nothing overwritten |
 | `search_captures` | Full-text search with optional tag and date filters |
 | `list_by_tag` | Browse all captures with a given tag or prefix |
 | `find_connections` | Show tag-overlap and `@`-reference connections for a capture |

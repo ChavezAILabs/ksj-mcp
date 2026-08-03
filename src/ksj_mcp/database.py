@@ -49,6 +49,8 @@ def init_db(db_path: Path | None = None) -> None:
                 confidence  REAL NOT NULL DEFAULT 0.0,
                 image_path  TEXT NOT NULL DEFAULT '',
                 source      TEXT NOT NULL DEFAULT 'journal',  -- 'journal' | 'ai_extract'
+                valid_from  TEXT,                -- bi-temporal: when this claim became current
+                valid_until TEXT,                -- set when superseded; the row is never deleted
                 created_at  TEXT NOT NULL
             );
 
@@ -65,9 +67,12 @@ def init_db(db_path: Path | None = None) -> None:
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_id   INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
                 target_id   INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
-                type        TEXT NOT NULL,           -- tag_overlap | reference
+                type        TEXT NOT NULL,           -- tag_overlap | entity_overlap | reference | asserted
                 strength    REAL NOT NULL DEFAULT 1.0,
-                method      TEXT NOT NULL
+                method      TEXT NOT NULL,
+                relation    TEXT,                    -- supersedes | refutes | narrows | supports (asserted only)
+                note        TEXT,                    -- optional human annotation
+                asserted_by TEXT NOT NULL DEFAULT 'derived'  -- 'derived' | 'user'
             );
 
             CREATE TABLE IF NOT EXISTS entities (
@@ -159,10 +164,10 @@ def insert_capture(
     cur = con.execute(
         """INSERT INTO captures
                (type, template_id, page_suffix, volume, content_json, raw_ocr,
-                summary, confidence, image_path, source, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary, confidence, image_path, source, valid_from, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (type_, template_id or None, page_suffix, volume, json.dumps(content),
-         raw_ocr, summary, confidence, image_path, source, now),
+         raw_ocr, summary, confidence, image_path, source, now, now),
     )
     return cur.lastrowid
 
@@ -340,26 +345,33 @@ def insert_connection(
     type_: str,
     strength: float,
     method: str,
+    relation: str | None = None,
+    note: str | None = None,
+    asserted_by: str = "derived",
 ) -> int:
     """
     Upsert an edge keyed on (source_id, target_id, type).
 
-    Tag overlap is symmetric, so those edges are stored in canonical
-    (low id → high id) direction — one row per pair. References are
-    directional and keep their true direction. Keying on type means a
-    reference edge and a tag_overlap edge can coexist on the same pair
-    (the old either-direction check silently swallowed references), and
-    re-inserting updates strength instead of duplicating.
+    Tag/entity overlap is symmetric, so those edges are stored in canonical
+    (low id → high id) direction — one row per pair. References and asserted
+    edges are directional and keep their true direction. Keying on type means
+    different edge kinds coexist on the same pair (the old either-direction
+    check silently swallowed references), and re-inserting updates in place
+    instead of duplicating.
     """
-    if type_ == "tag_overlap" and source_id > target_id:
+    if type_ in ("tag_overlap", "entity_overlap") and source_id > target_id:
         source_id, target_id = target_id, source_id
     cur = con.execute(
-        """INSERT INTO connections (source_id, target_id, type, strength, method)
-           VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO connections (source_id, target_id, type, strength, method,
+                                    relation, note, asserted_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source_id, target_id, type) DO UPDATE SET
-               strength = excluded.strength,
-               method   = excluded.method""",
-        (source_id, target_id, type_, strength, method),
+               strength    = excluded.strength,
+               method      = excluded.method,
+               relation    = excluded.relation,
+               note        = excluded.note,
+               asserted_by = excluded.asserted_by""",
+        (source_id, target_id, type_, strength, method, relation, note, asserted_by),
     )
     row = con.execute(
         "SELECT id FROM connections WHERE source_id=? AND target_id=? AND type=?",
@@ -415,20 +427,23 @@ def get_connections(
     volumes: list[int] | None = None,
 ) -> list[dict]:
     """
-    All edges touching *capture_id*, references ranked above tag overlap.
+    All edges touching *capture_id*, ranked: asserted relations first, then
+    references, then entity overlap, then tag overlap.
 
-    Each row carries a "direction" label: references are directional
-    ('cites' = this capture references the other, 'cited_by' = the other
-    references this one); tag overlap is symmetric ('shared').
+    Each row carries a "direction" label: directional edges (reference,
+    asserted) get 'cites'/'cited_by' relative to *capture_id*; symmetric
+    overlap edges get 'shared'.
     """
     vol_sql, vol_params = _volume_where(volumes, alias="cap")
     rows = con.execute(
         f"""SELECT c.id, c.source_id, c.target_id, c.type, c.strength, c.method,
+                  c.relation, c.note, c.asserted_by,
                   cap.template_id AS connected_template,
                   cap.volume      AS connected_volume,
                   cap.summary     AS connected_summary,
+                  cap.valid_until AS connected_valid_until,
                   CASE
-                      WHEN c.type != 'reference' THEN 'shared'
+                      WHEN c.type NOT IN ('reference', 'asserted') THEN 'shared'
                       WHEN c.source_id=? THEN 'cites'
                       ELSE 'cited_by'
                   END AS direction
@@ -438,7 +453,8 @@ def get_connections(
                ELSE c.source_id
            END
            WHERE (c.source_id=? OR c.target_id=?){vol_sql}
-           ORDER BY (c.type='reference') DESC, c.strength DESC""",
+           ORDER BY (c.type='asserted') DESC, (c.type='reference') DESC,
+                    (c.type='entity_overlap') DESC, c.strength DESC""",
         [capture_id, capture_id, capture_id, capture_id] + vol_params,
     ).fetchall()
     return [dict(r) for r in rows]
@@ -716,6 +732,7 @@ def get_captures_by_tag(
     if role:
         clauses.append("t.role = ?")
         params.append(role)
+    clauses.append("c.valid_until IS NULL")
 
     where = " AND ".join(clauses)
     vol_sql, vol_params = _volume_where(volumes)
@@ -874,8 +891,14 @@ def search_fts(
     date_to: str | None = None,
     limit: int = 20,
     volumes: list[int] | None = None,
+    include_superseded: bool = False,
 ) -> list[dict]:
-    """Full-text search with optional tag and date filters."""
+    """
+    Full-text search with optional tag and date filters.
+
+    Superseded captures (valid_until set) are excluded by default — queries
+    return the current slice; pass include_superseded=True for history.
+    """
     # Quote every token so FTS5 operators and punctuation ('.', '-', NEAR,
     # AND/OR, '*') in user input can't reach the query parser — a query like
     # "KSJ v2.0 upgrade" is otherwise a syntax error.
@@ -898,6 +921,8 @@ def search_fts(
     if date_to:
         extra_clauses.append("c.created_at <= ?")
         params.append(date_to)
+    if not include_superseded:
+        extra_clauses.append("c.valid_until IS NULL")
 
     extra_where = ("AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
     vol_sql, vol_params = _volume_where(volumes)
@@ -1415,6 +1440,200 @@ def migrate_v3(db_path: Path | None = None) -> bool:
     finally:
         con.execute("PRAGMA foreign_keys=ON")
         con.close()
+
+
+def migrate_v31(db_path: Path | None = None) -> None:
+    """
+    Additive server 3.1 migration: bi-temporal fields on captures
+    (valid_from back-filled from created_at, valid_until NULL) and typed-edge
+    fields on connections (relation, note, asserted_by='derived').
+
+    Plain ALTER TABLE ADD COLUMN — no rebuild, no data movement. Safe to
+    call on every startup; no-op once applied. Runs after migrate_v3.
+    """
+    path = db_path or _DEFAULT_DB
+    if not path.exists():
+        return
+
+    con = sqlite3.connect(str(path), isolation_level=None)
+    con.row_factory = sqlite3.Row
+    try:
+        cap_cols = [r[1] for r in con.execute("PRAGMA table_info(captures)").fetchall()]
+        if not cap_cols:
+            return  # fresh DB — init_db creates current schema
+        conn_cols = [r[1] for r in con.execute("PRAGMA table_info(connections)").fetchall()]
+        if "valid_from" in cap_cols and "relation" in conn_cols:
+            return
+
+        con.execute("BEGIN")
+        try:
+            if "valid_from" not in cap_cols:
+                con.execute("ALTER TABLE captures ADD COLUMN valid_from TEXT")
+                con.execute("ALTER TABLE captures ADD COLUMN valid_until TEXT")
+                con.execute("UPDATE captures SET valid_from = created_at")
+            if "relation" not in conn_cols:
+                con.execute("ALTER TABLE connections ADD COLUMN relation TEXT")
+                con.execute("ALTER TABLE connections ADD COLUMN note TEXT")
+                con.execute(
+                    "ALTER TABLE connections ADD COLUMN asserted_by TEXT NOT NULL DEFAULT 'derived'"
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+    finally:
+        con.close()
+
+
+# ── JSONL export / import (versioned interchange format) ──────────────────────
+
+EXPORT_SCHEMA_VERSION = "ksj-export-v1"
+
+
+def export_jsonl(con: sqlite3.Connection) -> str:
+    """
+    Full knowledge base as JSONL: one header record, then capture / tag /
+    entity / capture_entity / edge records. Documented in docs/EXPORT_FORMAT.md.
+    Derived edges are included for completeness but import rebuilds them;
+    only asserted edges are restored verbatim.
+    """
+    lines = [json.dumps({
+        "kind": "header",
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+    })]
+
+    for r in con.execute("SELECT * FROM captures ORDER BY id").fetchall():
+        rec = dict(r)
+        rec_fields = json.loads(rec.pop("content_json"))
+        lines.append(json.dumps({
+            "kind": "capture", "id": rec["id"], "type": rec["type"],
+            "template_id": rec["template_id"], "page_suffix": rec["page_suffix"],
+            "volume": rec["volume"], "date": rec["created_at"],
+            "fields": rec_fields, "raw_ocr": rec["raw_ocr"],
+            "corrected_ocr": rec["corrected_ocr"], "summary": rec["summary"],
+            "confidence": rec["confidence"], "image_path": rec["image_path"],
+            "source": rec["source"], "valid_from": rec["valid_from"],
+            "valid_until": rec["valid_until"],
+        }, ensure_ascii=False))
+
+    for r in con.execute("SELECT * FROM tags ORDER BY id").fetchall():
+        lines.append(json.dumps({
+            "kind": "tag", "capture_id": r["capture_id"], "prefix": r["prefix"],
+            "value": r["value"], "display": r["display"], "role": r["role"],
+        }, ensure_ascii=False))
+
+    for r in con.execute("SELECT * FROM entities ORDER BY id").fetchall():
+        lines.append(json.dumps({
+            "kind": "entity", "id": r["id"], "name": r["name"],
+            "normalized": r["normalized"], "entity_kind": r["kind"],
+        }, ensure_ascii=False))
+
+    for r in con.execute("SELECT * FROM capture_entities").fetchall():
+        lines.append(json.dumps({
+            "kind": "capture_entity", "capture_id": r["capture_id"],
+            "entity_id": r["entity_id"], "source": r["source"],
+        }, ensure_ascii=False))
+
+    for r in con.execute("SELECT * FROM connections ORDER BY id").fetchall():
+        lines.append(json.dumps({
+            "kind": "edge", "source": r["source_id"], "target": r["target_id"],
+            "type": r["type"], "relation": r["relation"], "strength": r["strength"],
+            "method": r["method"], "note": r["note"], "asserted_by": r["asserted_by"],
+        }, ensure_ascii=False))
+
+    return "\n".join(lines)
+
+
+def import_jsonl(con: sqlite3.Connection, text: str) -> dict:
+    """
+    Restore a ksj-export-v1 JSONL dump. Captures colliding with an existing
+    (volume, template_id, suffix) are skipped, so importing into a non-empty
+    base is additive, not destructive. Old capture/entity ids are remapped.
+    Asserted edges are restored; derived edges must be rebuilt by the caller
+    (rebuild_connections) so they reflect the merged base.
+
+    Returns {"captures": n, "skipped": n, "tags": n, "entities": n,
+             "asserted_edges": n}.
+    """
+    stats = {"captures": 0, "skipped": 0, "tags": 0, "entities": 0, "asserted_edges": 0}
+    id_map: dict[int, int] = {}       # old capture id -> new
+    entity_map: dict[int, int] = {}   # old entity id -> new
+    header_seen = False
+
+    records = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            records.append(json.loads(line))
+
+    for rec in records:
+        if rec.get("kind") == "header":
+            if rec.get("schema_version") != EXPORT_SCHEMA_VERSION:
+                raise ValueError(
+                    f"Unsupported export schema {rec.get('schema_version')!r} "
+                    f"(this server reads {EXPORT_SCHEMA_VERSION})"
+                )
+            header_seen = True
+    if not header_seen:
+        raise ValueError("Not a KSJ export: missing header record.")
+
+    for rec in records:
+        kind = rec.get("kind")
+        if kind == "capture":
+            tid = rec.get("template_id")
+            if tid and check_duplicate(con, tid, volume=rec.get("volume", 1)):
+                stats["skipped"] += 1
+                continue
+            cur = con.execute(
+                """INSERT INTO captures
+                       (type, template_id, page_suffix, volume, content_json,
+                        raw_ocr, corrected_ocr, summary, confidence, image_path,
+                        source, valid_from, valid_until, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (rec["type"], tid, rec.get("page_suffix"), rec.get("volume", 1),
+                 json.dumps(rec.get("fields", {})), rec.get("raw_ocr", ""),
+                 rec.get("corrected_ocr"), rec.get("summary", ""),
+                 rec.get("confidence", 0.0), rec.get("image_path", ""),
+                 rec.get("source", "journal"), rec.get("valid_from"),
+                 rec.get("valid_until"), rec.get("date") or rec.get("created_at", "")),
+            )
+            id_map[rec["id"]] = cur.lastrowid
+            stats["captures"] += 1
+        elif kind == "entity":
+            entity_map[rec["id"]] = upsert_entity(
+                con, rec["name"], rec.get("entity_kind", "other")
+            )
+            stats["entities"] += 1
+
+    for rec in records:
+        kind = rec.get("kind")
+        if kind == "tag" and rec["capture_id"] in id_map:
+            con.execute(
+                "INSERT INTO tags (capture_id, prefix, value, display, role) VALUES (?, ?, ?, ?, ?)",
+                (id_map[rec["capture_id"]], rec["prefix"], rec["value"],
+                 rec.get("display", rec["value"]), rec.get("role")),
+            )
+            stats["tags"] += 1
+        elif kind == "capture_entity" and rec["capture_id"] in id_map and rec["entity_id"] in entity_map:
+            con.execute(
+                "INSERT OR IGNORE INTO capture_entities (capture_id, entity_id, source) VALUES (?, ?, ?)",
+                (id_map[rec["capture_id"]], entity_map[rec["entity_id"]],
+                 rec.get("source", "extracted")),
+            )
+        elif kind == "edge" and rec.get("asserted_by") == "user":
+            src, tgt = id_map.get(rec["source"]), id_map.get(rec["target"])
+            if src and tgt:
+                insert_connection(
+                    con, src, tgt, rec.get("type", "asserted"),
+                    rec.get("strength", 1.0), rec.get("method", "asserted"),
+                    relation=rec.get("relation"), note=rec.get("note"),
+                    asserted_by="user",
+                )
+                stats["asserted_edges"] += 1
+
+    con.commit()
+    return stats
 
 
 def get_next_aiex_id(con: sqlite3.Connection) -> str:

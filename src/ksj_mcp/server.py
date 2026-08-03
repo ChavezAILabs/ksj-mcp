@@ -1,7 +1,13 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-21 tools:
+27 tools:
+  assert_connection  — Assert supersedes/refutes/narrows/supports between captures
+  find_path          — Shortest connection chain between two captures
+  neighborhood       — Everything within N hops of a capture
+  lint               — Health check: orphans, stale claims, contradictions, old questions
+  export_backup      — Full base to versioned JSONL (ksj-export-v1)
+  import_backup      — Restore a JSONL backup (additive, non-destructive)
   manual_capture     — Store a capture from assistant-transcribed text (primary path)
   upload_capture     — OCR a journal photo locally (Tesseract) and store it
   correct_ocr        — Replace a stored capture's transcription; re-parse and reconnect
@@ -42,8 +48,11 @@ from .database import (
     get_connections,
     get_current_volume,
     get_entities_for_capture,
+    export_jsonl,
+    import_jsonl,
     link_capture_entity,
     migrate_v3,
+    migrate_v31,
     set_setting,
     get_dc_pattern_data,
     get_journal_kpis,
@@ -64,7 +73,14 @@ from .database import (
     update_capture_correction,
     get_connection,
 )
-from .connections import build_connections, rebuild_connections as db_rebuild_connections
+from .connections import (
+    build_connections,
+    find_path as graph_find_path,
+    find_unapplied,
+    neighborhood as graph_neighborhood,
+    rebuild_connections as db_rebuild_connections,
+    run_lint,
+)
 from .ocr import (
     CloudOcrConfigError,
     OcrNotAvailableError,
@@ -183,6 +199,7 @@ migrate_add_aiex(_DB_PATH)
 migrate_fix_fk_references(_DB_PATH)
 migrate_add_corrected_ocr(_DB_PATH)
 _v3_migrated = migrate_v3(_DB_PATH)
+migrate_v31(_DB_PATH)
 init_db(_DB_PATH)
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -357,7 +374,7 @@ def _process_image(image_path: str, force: bool = False, volume: int = 0) -> dic
 
         result["stored_image"] = stored_image
 
-        # Store capture
+        # Store capture  (unapplied check runs after storing — see below)
         capture_id = insert_capture(
             con,
             type_=template_type,
@@ -388,6 +405,9 @@ def _process_image(image_path: str, force: bool = False, volume: int = 0) -> dic
 
         # Detect connections
         connections = build_connections(con, capture_id)
+
+        # §2.2a: surface prior uncited findings at the moment of writing
+        result["_unapplied"] = find_unapplied(con, capture_id)
 
         # Find strongest / most surprising connection for highlight
         highlight = None
@@ -470,6 +490,24 @@ def _format_upload_result(r: dict, image_path: str) -> str:
         lines.append(
             f"\n  ★ Strongest connection: {h['template_id']} ({age_str})\n"
             f"    \"{h['summary'] or '(no summary)'}\"{shared_str}"
+        )
+
+    # §2.2a unapplied check: earlier findings on the same rare topic or
+    # entity that nothing has ever cited — surfaced at the moment of writing
+    unapplied = r.get("_unapplied") or []
+    if unapplied:
+        lines.append("\n  ⚑ Earlier findings on this topic that nothing has cited yet:")
+        for u in unapplied:
+            label = u["template_id"] or f"#{u['id']}"
+            shared = ", ".join(u["shared"][:4])
+            summary = (u["summary"] or "(no summary)")[:70]
+            lines.append(
+                f"    {label} ({u['created_at'][:10]}) — shared: {shared}\n"
+                f"      \"{summary}\""
+            )
+        lines.append(
+            "    If one applies to this page, link it: assert_connection() or "
+            "add @<ID> via correct_ocr()."
         )
 
     return "\n".join(lines)
@@ -603,6 +641,7 @@ def manual_capture(text: str, template_id: str = "", force: bool = False, volume
         con.commit()
 
         connections = build_connections(con, capture_id)
+        result["_unapplied"] = find_unapplied(con, capture_id)
 
         highlight = None
         if connections:
@@ -905,7 +944,296 @@ def rebuild_connections() -> str:
         f"  Captures processed : {stats['captures']}\n"
         f"  Edges              : {stats['edges']} "
         f"({stats['references']} reference(s), "
-        f"{stats['edges'] - stats['references']} tag-overlap)"
+        f"{stats['edges'] - stats['references']} overlap)"
+    )
+
+
+# ── Tool: assert_connection ───────────────────────────────────────────────────
+
+@mcp.tool()
+def assert_connection(source_id: int, target_id: int, relation: str, note: str = "") -> str:
+    """
+    Assert a typed, directional relationship between two captures by hand.
+
+    Relations (source → target):
+      supersedes — source replaces target. Target is closed out (kept in
+                   history, hidden from current-slice search — never deleted).
+      refutes    — source contradicts target.
+      narrows    — source restricts target's claim without overturning it.
+      supports   — source is evidence for target.
+
+    Automatic contradiction detection is deliberately not offered — it
+    cannot be done reliably. Supersession is either asserted here by a
+    human or not recorded. Re-asserting between the same pair replaces the
+    previous assertion.
+
+    Args:
+        source_id: The newer / asserting capture (numeric ID).
+        target_id: The capture being superseded / refuted / supported.
+        relation:  supersedes | refutes | narrows | supports
+        note:      Optional one-line reason, stored on the edge.
+    """
+    relation = relation.strip().lower()
+    valid = {"supersedes", "refutes", "narrows", "supports"}
+    if relation not in valid:
+        return f"Unknown relation {relation!r} — use one of: {', '.join(sorted(valid))}."
+    if source_id == target_id:
+        return "A capture cannot relate to itself."
+
+    with _db() as con:
+        src = get_capture(con, source_id)
+        tgt = get_capture(con, target_id)
+        if src is None:
+            return f"No capture with id #{source_id}."
+        if tgt is None:
+            return f"No capture with id #{target_id}."
+
+        insert_connection(
+            con, source_id, target_id, "asserted", 1.0, "asserted",
+            relation=relation, note=note.strip() or None, asserted_by="user",
+        )
+
+        closed_note = ""
+        if relation == "supersedes" and not tgt.get("valid_until"):
+            now = datetime.now(timezone.utc).isoformat()
+            con.execute("UPDATE captures SET valid_until=? WHERE id=?", (now, target_id))
+            closed_note = (
+                f"\n{tgt['template_id'] or f'#{target_id}'} is closed out: kept in "
+                f"history, hidden from current-slice search (find it with "
+                f"include_superseded if needed)."
+            )
+        con.commit()
+
+    src_label = src["template_id"] or f"#{source_id}"
+    tgt_label = tgt["template_id"] or f"#{target_id}"
+    note_str = f'\n  Note: "{note.strip()}"' if note.strip() else ""
+    return f"Asserted: {src_label} {relation} {tgt_label}.{note_str}{closed_note}"
+
+
+# ── Tool: find_path ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+def find_path(from_id: int, to_id: int) -> str:
+    """
+    Find the shortest chain of connections between two captures — how one
+    idea reaches another through references, shared entities, asserted
+    relations, and strong tag overlap.
+
+    Args:
+        from_id: Starting capture (numeric ID).
+        to_id:   Destination capture (numeric ID).
+    """
+    with _db() as con:
+        a = get_capture(con, from_id)
+        b = get_capture(con, to_id)
+        if a is None:
+            return f"No capture with id #{from_id}."
+        if b is None:
+            return f"No capture with id #{to_id}."
+        path = graph_find_path(con, from_id, to_id)
+        labels = {}
+        if path:
+            for hop in path:
+                cap = get_capture(con, hop["id"])
+                labels[hop["id"]] = cap["template_id"] or f"#{hop['id']}" if cap else f"#{hop['id']}"
+
+    a_label = a["template_id"] or f"#{from_id}"
+    b_label = b["template_id"] or f"#{to_id}"
+    if path is None:
+        return (
+            f"No path between {a_label} and {b_label} within 6 hops.\n"
+            "They live in disconnected parts of the graph — that itself can be "
+            "interesting: is there a connection worth writing down?"
+        )
+
+    lines = [f"Path from {a_label} to {b_label} ({len(path) - 1} hop(s)):\n"]
+    for hop in path:
+        via = f"  --[{hop['via'].replace('_', ' ')}]--> " if hop["via"] else "  "
+        lines.append(f"{via}{labels[hop['id']]}")
+    return "\n".join(lines)
+
+
+# ── Tool: neighborhood ────────────────────────────────────────────────────────
+
+@mcp.tool()
+def neighborhood(capture_id: int, depth: int = 2) -> str:
+    """
+    Everything within N hops of a capture in the connection graph — its
+    local knowledge cluster.
+
+    Args:
+        capture_id: Center capture (numeric ID).
+        depth:      How many hops out to walk (default 2, max 4).
+    """
+    depth = max(1, min(depth, 4))
+    with _db() as con:
+        cap = get_capture(con, capture_id)
+        if cap is None:
+            return f"No capture with id #{capture_id}."
+        dist = graph_neighborhood(con, capture_id, depth=depth)
+        rows = []
+        for cid, d in sorted(dist.items(), key=lambda x: (x[1], x[0])):
+            other = get_capture(con, cid)
+            if other:
+                rows.append((d, other["template_id"] or f"#{cid}",
+                             (other["summary"] or "")[:60]))
+
+    label = cap["template_id"] or f"#{capture_id}"
+    if not rows:
+        return f"{label} has no connected captures within {depth} hop(s)."
+
+    lines = [f"Neighborhood of {label} — {len(rows)} capture(s) within {depth} hop(s):\n"]
+    current_d = None
+    for d, tid, summary in rows:
+        if d != current_d:
+            lines.append(f"  {d} hop(s) away:")
+            current_d = d
+        lines.append(f"    {tid}  {summary}")
+    return "\n".join(lines)
+
+
+# ── Tool: lint ────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def lint(stale_question_days: int = 30) -> str:
+    """
+    Knowledge base health check. Catches the ways a knowledge base silently
+    rots: orphan captures nothing links to, superseded claims not closed
+    out, unresolved contradictions, open questions going stale, and
+    fragmented tags from normalization failures.
+
+    Run it occasionally — a base that is never linted entrenches errors
+    instead of correcting them.
+
+    Args:
+        stale_question_days: Age at which an unanswered ? question is
+                             flagged (default 30).
+    """
+    with _db() as con:
+        report = run_lint(con, stale_question_days=stale_question_days)
+
+    lines = ["Knowledge Base Lint\n" + "─" * 40]
+
+    orphans = report["orphans"]
+    lines.append(f"\nOrphan captures (no connections at all): {len(orphans)}")
+    for o in orphans[:10]:
+        lines.append(f"  [{o['template_id'] or '#' + str(o['id'])}]  {(o['summary'] or '')[:60]}")
+    if len(orphans) > 10:
+        lines.append(f"  … and {len(orphans) - 10} more")
+    if not orphans:
+        lines.append("  (none)")
+
+    stale = report["stale_claims"]
+    lines.append(f"\nSuperseded but not closed out: {len(stale)}")
+    for s in stale:
+        lines.append(f"  [{s['template_id']}]  {(s['summary'] or '')[:60]}")
+    if not stale:
+        lines.append("  (none)")
+
+    refutes = report["refutes_pairs"]
+    lines.append(f"\nUnresolved contradictions (refutes, both sides current): {len(refutes)}")
+    for p in refutes:
+        lines.append(f"  {p['source_template']} refutes {p['target_template']} — decide which stands")
+    if not refutes:
+        lines.append("  (none)")
+
+    questions = report["stale_questions"]
+    lines.append(f"\nOpen questions older than {stale_question_days} days: {len(questions)}")
+    for q in questions[:10]:
+        lines.append(f"  [{q['template_id']}] ({q['created_at'][:10]})  ?{q['question']}")
+    if len(questions) > 10:
+        lines.append(f"  … and {len(questions) - 10} more")
+    if not questions:
+        lines.append("  (none)")
+
+    singles = report["singleton_tags"]
+    lines.append(f"\nTags used exactly once (possible fragmentation): {len(singles)}")
+    if singles:
+        lines.append("  " + "  ".join(f"{t['prefix']}{t['value']}" for t in singles[:15]))
+        lines.append("  A near-duplicate of a common tag usually means a spelling variant "
+                     "worth fixing via correct_ocr.")
+    else:
+        lines.append("  (none)")
+
+    return "\n".join(lines)
+
+
+# ── Tool: export_backup / import_backup ───────────────────────────────────────
+
+@mcp.tool()
+def export_backup(file_path: str = "") -> str:
+    """
+    Write the entire knowledge base to a versioned JSONL file (ksj-export-v1)
+    — a real backup with a matching import path, not a one-way dump.
+
+    Contains captures (all fields), tags, entities, and connections. The
+    format is documented in docs/EXPORT_FORMAT.md in the ksj-mcp repo, so
+    anything can consume it.
+
+    Args:
+        file_path: Where to write. Default: ksj-export-<date>.jsonl in the
+                   KSJ data directory.
+    """
+    with _db() as con:
+        text = export_jsonl(con)
+
+    if file_path.strip():
+        path = Path(file_path.strip())
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+        path = _data_dir() / f"ksj-export-{stamp}.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError as e:
+        return f"Could not write {path}: {e}"
+
+    n_caps = text.count('"kind": "capture"')
+    return (
+        f"Backup written: {path}\n"
+        f"  {n_caps} capture(s), {len(text.splitlines())} records, "
+        f"{len(text) // 1024} KB\n"
+        f"Restore with import_backup({str(path)!r})."
+    )
+
+
+@mcp.tool()
+def import_backup(file_path: str) -> str:
+    """
+    Restore a ksj-export-v1 JSONL backup into the knowledge base.
+
+    Additive and non-destructive: captures that collide with an existing
+    (volume, template ID) are skipped, nothing is overwritten. User-asserted
+    edges are restored; derived connections are rebuilt over the merged base.
+
+    Args:
+        file_path: Path to a file produced by export_backup.
+    """
+    path = Path(file_path.strip())
+    if not path.exists():
+        return f"File not found: {path}"
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"Could not read {path}: {e}"
+
+    with _db() as con:
+        try:
+            stats = import_jsonl(con, text)
+        except (ValueError, json.JSONDecodeError) as e:
+            return f"Import failed, nothing was written: {e}"
+        rebuild = db_rebuild_connections(con)
+
+    return (
+        f"Import complete from {path.name}:\n"
+        f"  Captures restored : {stats['captures']} "
+        f"({stats['skipped']} skipped as already present)\n"
+        f"  Tags              : {stats['tags']}\n"
+        f"  Entities          : {stats['entities']}\n"
+        f"  Asserted edges    : {stats['asserted_edges']}\n"
+        f"Connection graph rebuilt over the merged base "
+        f"({rebuild['edges']} edge(s) total)."
     )
 
 
@@ -1079,29 +1407,33 @@ def find_connections(capture_id: int, min_strength: float = 2.0, limit: int = 20
             "Upload more captures to discover relationships." + scope_note
         )
 
-    refs     = [c for c in connections if c["type"] == "reference"]
-    overlaps = [c for c in connections if c["type"] != "reference"]
+    always   = [c for c in connections if c["type"] in ("asserted", "reference")]
+    overlaps = [c for c in connections if c["type"] not in ("asserted", "reference")]
     strong   = [c for c in overlaps if c["strength"] >= min_strength]
-    shown    = (refs + strong)[:limit]
+    shown    = (always + strong)[:limit]
     hidden_weak = len(overlaps) - len(strong)
-
-    direction_labels = {
-        "cites":    "→ cites",
-        "cited_by": "← cited by",
-        "shared":   "↔ shares tags with",
-    }
 
     lines = [
         f"Connections for {label} (#{capture_id}) — "
         f"showing {len(shown)} of {len(connections)} total:\n"
     ]
     for c in shown:
-        dir_label = direction_labels.get(c.get("direction", "shared"), "↔")
+        if c["type"] == "asserted":
+            rel = c.get("relation") or "related to"
+            dir_label = f"→ {rel}" if c["direction"] == "cites" else f"← {rel} by"
+        elif c["type"] == "reference":
+            dir_label = "→ cites" if c["direction"] == "cites" else "← cited by"
+        elif c["type"] == "entity_overlap":
+            dir_label = "↔ shares entities with"
+        else:
+            dir_label = "↔ shares tags with"
         vol_str = f" (vol {c['connected_volume']})" if c.get("connected_volume", 1) != 1 else ""
+        superseded = "  [superseded]" if c.get("connected_valid_until") else ""
+        note_str = f"\n    note: {c['note']}" if c.get("note") else ""
         lines.append(
-            f"  {dir_label} {c['connected_template'] or 'UNIDENTIFIED'}{vol_str}"
+            f"  {dir_label} {c['connected_template'] or 'UNIDENTIFIED'}{vol_str}{superseded}"
             f"  [{c['method'].replace('_', ' ')}]  strength={c['strength']:.1f}\n"
-            f"    {c['connected_summary'] or '(no summary)'}"
+            f"    {c['connected_summary'] or '(no summary)'}{note_str}"
         )
     if hidden_weak > 0:
         lines.append(
@@ -1195,21 +1527,62 @@ def export_captures(format: str = "markdown", tag_filter: str = "") -> str:
     if fmt == "json":
         return json.dumps(captures, indent=2, default=str)
 
-    lines = ["# KSJ Knowledge Base Export\n"]
-    for c in captures:
-        tags_str = " ".join(f"{t['prefix']}{t['value']}" for t in c.get("tags", []))
-        lines.append(f"## {c['template_id']}  (#{c['id']})")
-        lines.append(f"**Date:** {c['created_at'][:10]}  |  **Confidence:** {c['confidence']:.0%}")
-        lines.append(f"**Tags:** {tags_str or 'none'}")
-        lines.append(f"\n{c['summary'] or '*(no summary)*'}\n")
+    # Plain markdown, deliberately: YAML frontmatter per capture, connections
+    # under "## Related" as bare template IDs with relation labels — no
+    # application-specific link syntax (§2.4c). Hand-written journal captures
+    # and AI-extracted entries are kept in separate sections (§0.3/§1.11).
+    with _db() as con:
+        related_by_id = {c["id"]: get_connections(con, c["id"]) for c in captures}
 
-        content = c.get("content", {})
-        if content:
-            for field, val in content.items():
-                if val and field != "tags_raw":
-                    lines.append(f"**{field.replace('_', ' ').title()}:**")
-                    lines.append(str(val))
-        lines.append("---\n")
+    def _render(c: dict) -> list[str]:
+        tags_str = ", ".join(f"{t['prefix']}{t['value']}" for t in c.get("tags", []))
+        out = [
+            "---",
+            f"template_id: {c['template_id'] or 'unidentified'}",
+            f"volume: {c.get('volume', 1)}",
+            f"capture_id: {c['id']}",
+            f"date: {c['created_at'][:10]}",
+            f"source: {c.get('source', 'journal')}",
+            f"confidence: {c['confidence']:.2f}",
+            f"ocr_source: {'corrected' if c.get('corrected_ocr') else 'raw'}",
+            f"tags: [{tags_str}]",
+        ]
+        if c.get("valid_until"):
+            out.append(f"superseded: {c['valid_until'][:10]}")
+        out += ["---", "", f"# {c['template_id'] or 'Unidentified'}  (#{c['id']})", ""]
+        out.append(c["summary"] or "*(no summary)*")
+        out.append("")
+
+        for field, val in (c.get("content") or {}).items():
+            if val and field != "tags_raw":
+                out.append(f"**{field.replace('_', ' ').title()}:**")
+                out.append(str(val))
+                out.append("")
+
+        related = related_by_id.get(c["id"]) or []
+        if related:
+            out.append("## Related")
+            for r in related[:15]:
+                rel_label = r.get("relation") or r["type"].replace("_", " ")
+                direction = "" if r.get("direction") == "shared" else f" ({r['direction']})"
+                out.append(f"- {r['connected_template'] or '#' + str(r['target_id'])}"
+                           f" — {rel_label}{direction}")
+            out.append("")
+        return out
+
+    journal = [c for c in captures if c.get("source", "journal") != "ai_extract"]
+    ai      = [c for c in captures if c.get("source", "journal") == "ai_extract"]
+
+    lines = ["# KSJ Knowledge Base Export", ""]
+    lines.append(f"## Journal Captures ({len(journal)})" if journal else "## Journal Captures (0)")
+    lines.append("")
+    for c in journal:
+        lines += _render(c)
+    if ai:
+        lines.append(f"## AI-Extracted Entries ({len(ai)})")
+        lines.append("")
+        for c in ai:
+            lines += _render(c)
 
     return "\n".join(lines)
 
@@ -1633,6 +2006,15 @@ def dream_patterns() -> str:
     recurring_motifs   = _tag_freq_by_prefix("!")   # !recurring
     recurring_sensory  = _tag_freq_by_prefix("*")   # *sensory
 
+    # Sensory modality share: in how many dreams does each modality appear
+    # at all (counted once per dream, including single occurrences)
+    sensory_dreams: dict[str, int] = {}
+    for d in dc_entries:
+        seen_here = {t["value"] for t in d["tags"] if t["prefix"] == "*"}
+        for v in seen_here:
+            sensory_dreams[v] = sensory_dreams.get(v, 0) + 1
+    sensory_dreams = dict(sorted(sensory_dreams.items(), key=lambda x: -x[1]))
+
     lines = [
         f"Dream Pattern Analysis — {len(dc_entries)} DC entries\n" + "─" * 50,
         f"\nDate range: {dc_entries[0]['created_at'][:10]}  →  {dc_entries[-1]['created_at'][:10]}",
@@ -1657,12 +2039,18 @@ def dream_patterns() -> str:
         lines.append("\nRecurring emotions: (none detected yet)")
 
     if recurring_motifs:
-        lines.append("\nRecurring motifs (!):")
+        # Writer-FLAGGED recurrence — a symbol the dreamer marked !recurring
+        # three times carries more analytic weight than one merely mentioned
+        # five times. Kept separate from the counted frequencies above.
+        lines.append("\nMotifs you flagged as recurring (!):")
         lines.append("  " + "  |  ".join(f"!{k} ×{v}" for k, v in list(recurring_motifs.items())[:10]))
 
-    if recurring_sensory:
-        lines.append("\nSensory details (*):")
-        lines.append("  " + "  |  ".join(f"*{k} ×{v}" for k, v in list(recurring_sensory.items())[:10]))
+    if sensory_dreams:
+        n = len(dc_entries)
+        lines.append("\nSensory modalities (share of dreams each appears in):")
+        lines.append("  " + "  |  ".join(
+            f"*{k} {v}/{n} ({v / n:.0%})" for k, v in list(sensory_dreams.items())[:10]
+        ))
 
     if recurring_themes:
         lines.append("\nRecurring themes (#):")

@@ -15,6 +15,7 @@ from ksj_mcp.database import (
     insert_tags,
     migrate_add_corrected_ocr,
     migrate_v3,
+    migrate_v31,
     search_fts,
     update_capture_correction,
 )
@@ -200,6 +201,7 @@ class TestMigrateAddCorrectedOcr:
         db_path = self._make_old_db(tmp_path)
         migrate_add_corrected_ocr(db_path)
         assert migrate_v3(db_path) is True
+        migrate_v31(db_path)
 
         con = get_connection(db_path)
         assert search_fts(con, "legacy") != []
