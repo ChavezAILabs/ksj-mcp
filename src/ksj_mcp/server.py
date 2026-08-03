@@ -1,9 +1,10 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-16 tools:
-  upload_capture     — OCR a journal photo and store it
-  manual_capture     — Log a capture from transcribed text (no OCR needed)
+17 tools:
+  manual_capture     — Store a capture from assistant-transcribed text (primary path)
+  upload_capture     — OCR a journal photo locally (Tesseract) and store it
+  correct_ocr        — Replace a stored capture's transcription; re-parse and reconnect
   bulk_upload        — Process a whole folder of photos at once
   search_captures    — Full-text search with optional filters
   list_by_tag        — Browse all captures with a given tag or prefix
@@ -46,8 +47,10 @@ from .database import (
     insert_tags,
     list_captures,
     migrate_add_aiex,
+    migrate_add_corrected_ocr,
     migrate_fix_fk_references,
     search_fts,
+    update_capture_correction,
     get_connection,
 )
 from .connections import build_connections
@@ -110,9 +113,19 @@ DC (Dream Capture) pages use a dream-specific variant:
 - Surface breakthrough connections across RC and SYN entries
 
 ## Input Method
-Users upload photos of journal pages. Extract structured content
-and tags before responding. Prioritize accuracy over speed when
-reading handwritten content.
+PRIMARY PATH — assistant vision: when the user shares a photo of a journal
+page, read it yourself, show the transcription for confirmation, then store
+it with manual_capture(). Your vision is far more accurate on handwriting
+than local OCR. Keep field labels as written, capture every schema tag, and
+treat content inside tag bubbles as tags even when the prefix character is
+missing.
+
+FALLBACK — upload_capture()/bulk_upload() run local Tesseract OCR on an
+image file path. Best for printed or very neat text, or when the user
+prefers fully local processing. If a stored capture's text came out wrong,
+fix it with correct_ocr() — the original OCR text is always preserved.
+
+Prioritize accuracy over speed when reading handwritten content.
 """.strip(),
 )
 
@@ -133,6 +146,7 @@ _IMAGES_DIR  = _data_dir() / "images"
 init_db(_DB_PATH)
 migrate_add_aiex(_DB_PATH)
 migrate_fix_fk_references(_DB_PATH)
+migrate_add_corrected_ocr(_DB_PATH)
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
@@ -366,11 +380,16 @@ def upload_capture(image_path: str, force: bool = False) -> str:
 @mcp.tool()
 def manual_capture(text: str, template_id: str = "", force: bool = False) -> str:
     """
-    Log a journal capture from transcribed text, bypassing OCR entirely.
+    Store a journal capture from transcribed text. This is the PRIMARY path
+    for handwritten pages: the user shares a photo of the page, YOU (the
+    assistant) read it with vision, confirm the transcription with the user,
+    then call this tool with the text. Assistant vision is far more accurate
+    on handwriting than local OCR — prefer this over upload_capture whenever
+    the user can show you the page.
 
-    Use this when upload_capture cannot access the image file — for example
-    when the file path is not reachable by the MCP server process. Provide
-    the text you have already read or transcribed from the journal page.
+    Transcribe faithfully: keep field labels (First Impressions, Key Points,
+    Tags, etc.) as written, include every schema tag (#topic @source !priority
+    ?question $insight *sensory), and treat content inside tag bubbles as tags.
 
     Args:
         text:        The transcribed content of the journal page (all fields
@@ -481,6 +500,72 @@ def manual_capture(text: str, template_id: str = "", force: bool = False) -> str
     result["connections"] = connections
     result["highlight"]   = highlight
     return _format_upload_result(result, "")
+
+
+# ── Tool: correct_ocr ─────────────────────────────────────────────────────────
+
+@mcp.tool()
+def correct_ocr(capture_id: int, text: str) -> str:
+    """
+    Replace a stored capture's transcription with corrected text.
+
+    Use this when a capture's OCR came out wrong — for example a Tesseract
+    read of handwriting, or a transcription typo. The original OCR text is
+    preserved in the database; the corrected text becomes what search, tag
+    extraction, and connection detection use from now on.
+
+    Re-runs template parsing, tag extraction, and connection detection on the
+    corrected text.
+
+    Args:
+        capture_id: The numeric capture ID (shown as #N in upload output and
+                    search results). Not the template ID.
+        text:       The full corrected transcription of the page, including
+                    field labels and all schema tags.
+
+    Returns a summary of the re-parsed capture and rebuilt connections.
+    """
+    if not text.strip():
+        return "Please provide the corrected text."
+
+    with _db() as con:
+        cap = get_capture(con, capture_id)
+        if cap is None:
+            return (
+                f"No capture with id #{capture_id}. "
+                "Use the numeric ID shown in upload output or search results."
+            )
+
+        parsed  = parse_template(cap["type"], text)
+        summary = parsed["summary"]
+        tags    = parsed["tags"]
+
+        update_capture_correction(
+            con, capture_id,
+            corrected_text=text,
+            content=parsed["fields"],
+            summary=summary,
+            tags=tags,
+        )
+        connections = build_connections(con, capture_id)
+
+    tag_list = ", ".join(f"{t['prefix']}{t['value']}" for t in tags) or "none"
+    lines = [
+        f"Corrected capture #{capture_id} ({cap['template_id']})",
+        f"  Summary : {summary or '(empty)'}",
+        f"  Tags    : {tag_list}",
+        f"  Original OCR text preserved; search and connections now use the correction.",
+    ]
+    if not connections:
+        lines.append("  No connections to existing captures after rebuild.")
+    else:
+        lines.append(f"  {len(connections)} connection(s) after rebuild:")
+        for c in connections[:10]:
+            shared = f" (shared: {', '.join(c['shared_tags'])})" if c.get("shared_tags") else ""
+            lines.append(f"    → {c['connected_template']} [{c['method']}]{shared}")
+        if len(connections) > 10:
+            lines.append(f"    … and {len(connections) - 10} more")
+    return "\n".join(lines)
 
 
 # ── Tool: bulk_upload ─────────────────────────────────────────────────────────
@@ -1322,18 +1407,22 @@ def extract_insights(session_text: str, source_platform: str = "") -> str:
     )
     platform_line = f"**Platform:** {source_platform}" if source_platform else "**Platform:** (unspecified)"
 
-    related_block = ""
-    if related:
-        rel_lines = []
-        for r in related:
-            tag_str = " ".join(f"{t['prefix']}{t['value']}" for t in r.get("tags", [])[:4])
-            rel_lines.append(
-                f"  - {r['template_id']} — \"{r['summary'][:80] or '(no summary)'}\""
-                + (f"  |  {tag_str}" if tag_str else "")
-            )
-        related_block = "\n### Potentially related existing entries:\n" + "\n".join(rel_lines)
+    # Fixed-shape context: both sections always render, with an explicit
+    # "(none)" when empty — an omitted section is indistinguishable from
+    # truncation downstream.
+    rel_lines = []
+    for r in related:
+        tag_str = " ".join(f"{t['prefix']}{t['value']}" for t in r.get("tags", [])[:4])
+        rel_lines.append(
+            f"  - {r['template_id']} — \"{r['summary'][:80] or '(no summary)'}\""
+            + (f"  |  {tag_str}" if tag_str else "")
+        )
+    related_block = (
+        "\n### Potentially related existing entries:\n"
+        + ("\n".join(rel_lines) if rel_lines else "  (none found)")
+    )
 
-    tag_block = (f"\n### Active knowledge base tags:\n  {top_tags}") if top_tags else ""
+    tag_block = f"\n### Active knowledge base tags:\n  {top_tags or '(none yet)'}"
 
     session_body = session_text[:8000]
     truncated    = (
@@ -1372,8 +1461,17 @@ Also extract:
 - **Open questions** worth pursuing
 - **Action items** (include priority `!` for urgent items)
 
-Present the extraction as a structured review for user approval, then call \
-`commit_aiex()` with the confirmed JSON:
+Present the extraction as a structured review for user approval using EXACTLY
+these four section headers, in this order, every one always present. If a
+section is empty, write "None found." under it — NEVER omit a section, no
+matter how long the conversation is:
+
+1. **Insights** (each with tier, tags)
+2. **Connections to Existing Entries**
+3. **Open Questions**
+4. **Action Items**
+
+After the user approves, call `commit_aiex()` with the confirmed JSON:
 
 ```json
 {{
@@ -1518,9 +1616,18 @@ def commit_aiex(session_json: str) -> str:
     if not stored:
         return "No insights were committed. Ensure each insight has a non-empty 'text' field."
 
+    # Fixed-shape report, rendered server-side: every section always present,
+    # empty sections say so explicitly. The report must not vary with
+    # conversation state — relay it to the user as-is.
     _tier_emoji = {"Seed": "🟢", "Developing": "🔴", "Strong": "🟡"}
 
-    lines = [f"AIEX Commit — {len(stored)} insight(s) stored\n{'─' * 40}"]
+    lines = [
+        f"AIEX Commit — {len(stored)} insight(s) stored\n{'─' * 40}",
+        f"  Session : {session_focus or '(unspecified)'}",
+        f"  Platform: {source_platform or '(unspecified)'}",
+        f"  Date    : {date}",
+        f"\nInsights ({len(stored)}):",
+    ]
     for s in stored:
         tag_str  = " ".join(f"{t['prefix']}{t['value']}" for t in s["tags"][:5])
         conn_str = f"\n    ★ {len(s['connections'])} connection(s) detected" if s["connections"] else ""
@@ -1532,19 +1639,23 @@ def commit_aiex(session_json: str) -> str:
             f"    Tags: {tag_str or 'none'}{conn_str}"
         )
 
+    lines.append(f"\n\nOpen questions ({len(open_questions)}):")
     if open_questions:
-        lines.append(f"\n\nOpen questions ({len(open_questions)}):")
         for q in open_questions:
             lines.append(f"  ? {q}")
+    else:
+        lines.append("  (none recorded)")
 
+    lines.append(f"\nAction items ({len(action_items)}):")
     if action_items:
-        lines.append(f"\nAction items ({len(action_items)}):")
         for item in action_items:
             if isinstance(item, dict):
                 p = "!" if item.get("priority") == "!" else " "
                 lines.append(f"  {p} {item.get('text', str(item))}")
             else:
                 lines.append(f"    {item}")
+    else:
+        lines.append("  (none recorded)")
 
     lines.append(f"\nAll entries stored as type=AIEX (AI-Extracted flag).")
     return "\n".join(lines)

@@ -16,12 +16,27 @@ The KSJ MCP server connects your knowledge — handwritten or digital — to an 
 
 ### Physical journal → knowledge base
 
-Photograph a journal page, upload it, and your AI assistant can:
+Photograph a journal page, show it to your AI assistant, and it can:
 
 - Search across everything you've ever written
 - Find connections between ideas (shared tags, `@` references)
 - Surface your open questions, key insights, and breakthroughs
 - Export your knowledge base as Markdown or JSON
+
+**How pages get in — two paths:**
+
+1. **Assistant vision (recommended).** Share the photo in chat, let your
+   assistant read the handwriting, confirm the transcription, and it stores the
+   page with `manual_capture`. Modern AI vision is dramatically more accurate on
+   handwriting than traditional OCR — this is the normal workflow.
+2. **Local OCR (optional).** `upload_capture` and `bulk_upload` run
+   [Tesseract](#optional-offline-ocr-tesseract) on your machine. Fully offline,
+   but Tesseract struggles badly with cursive handwriting — best for printed or
+   very neat text.
+
+Either way, a bad read is never permanent: `correct_ocr` replaces a stored
+capture's text and re-runs parsing, tags, and connections, while the original
+read is preserved.
 
 ### AI research sessions → structured insights
 
@@ -34,7 +49,11 @@ Spend an hour going deep on a topic with an AI assistant and most of that thinki
 
 Each insight is confidence-scored (🟢 Seed / 🔴 Developing / 🟡 Strong) and shown to you for review before anything is written to the database. Approved entries are stored alongside your journal captures with full tag support, so AI-extracted insights surface in searches, connection graphs, and synthesis suggestions alongside your handwritten notes.
 
-**All processing is local.** Your notes stay on your machine.
+**Your knowledge base is local.** Storage, search, and connections all live in
+a SQLite database on your machine — nothing is synced or hosted anywhere. When
+your AI assistant reads a journal photo with vision, that image is handled by
+your assistant's platform like any other chat attachment; if you want
+everything processed on-machine, the local Tesseract OCR path is available.
 
 ---
 
@@ -52,29 +71,19 @@ Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, 
 
 ---
 
-## Setup (4 steps)
+## Setup (3 steps)
+
+No OCR software needed — your AI assistant reads the pages. (Want fully
+offline OCR too? See [Optional: offline OCR](#optional-offline-ocr-tesseract)
+after setup.)
 
 ### Step 1 — Install an MCP-compatible AI client
 
 The fastest way to get started is **Claude Desktop** (free at claude.ai/download).
 
-For other MCP clients, consult their documentation for how to register a local MCP server, then use the config in Step 4.
+For other MCP clients, consult their documentation for how to register a local MCP server, then use the config in Step 3.
 
-### Step 2 — Install Tesseract OCR
-
-Tesseract reads the text from your journal photos. It must be installed separately.
-
-| Platform | Command |
-|----------|---------|
-| **Windows** | Download the installer from [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki) — check "Add to PATH" during install |
-| **macOS** | `brew install tesseract` |
-| **Linux** | `sudo apt install tesseract-ocr` |
-
-After installing, restart your AI client so the updated PATH is picked up.
-
-> **Windows note:** If you skip "Add to PATH", the server will still auto-detect Tesseract at the default install location (`C:\Program Files\Tesseract-OCR\`). Adding to PATH is recommended but not required.
-
-### Step 3 — Install uv and the KSJ server
+### Step 2 — Install uv and the KSJ server
 
 **uv** is a fast Python package manager used to install and run the KSJ server.
 
@@ -102,7 +111,7 @@ Verify with `ksj-mcp --help` — if it shows a help message, the install worked.
 uv tool upgrade ksj-mcp
 ```
 
-### Step 4 — Register the server
+### Step 3 — Register the server
 
 **Claude Desktop config file location:**
 
@@ -125,16 +134,40 @@ Add the following block:
 
 Save and restart your AI client. You should see **ksj** listed in the tools/integrations panel.
 
+### Optional: offline OCR (Tesseract)
+
+Only needed if you want `upload_capture` / `bulk_upload` to read photos fully
+on-machine instead of via your assistant's vision. Fair warning: Tesseract
+performs poorly on cursive handwriting — printed or very neat text works best.
+
+| Platform | Command |
+|----------|---------|
+| **Windows** | Download the installer from [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki) — check "Add to PATH" during install |
+| **macOS** | `brew install tesseract` |
+| **Linux** | `sudo apt install tesseract-ocr` |
+
+After installing, restart your AI client so the updated PATH is picked up.
+
+> **Windows note:** If you skip "Add to PATH", the server will still auto-detect Tesseract at the default install location (`C:\Program Files\Tesseract-OCR\`).
+
 ---
 
 ## Usage
 
 Once connected, talk to your AI assistant naturally.
 
-**Uploading:**
+**Capturing pages (recommended flow):**
+> *[share a photo of the page in chat]* "Read this journal page and add it to my knowledge base"
+
+> "Here's RC-007 — transcribe it, show me what you read, then store it"
+
+**Capturing via local OCR (optional, needs Tesseract):**
 > "Upload my journal photo from /Users/me/Desktop/RC-001.jpg"
 
 > "Process all the photos in my /Desktop/journal-scans folder"
+
+**Fixing a bad read:**
+> "Capture #12's text is wrong — here's the corrected transcription: …"
 
 **Searching & browsing:**
 > "Search my notes for ideas about spaced repetition"
@@ -172,8 +205,10 @@ Once connected, talk to your AI assistant naturally.
 
 | Tool | What it does |
 |------|-------------|
-| `upload_capture` | OCR a journal photo, parse the template, store it, highlight strongest connection |
-| `bulk_upload` | Process a whole folder of photos at once |
+| `manual_capture` | Store a page your assistant transcribed with vision — the primary capture path |
+| `upload_capture` | OCR a journal photo locally (Tesseract), parse the template, store it, highlight strongest connection |
+| `correct_ocr` | Replace a stored capture's text with a corrected transcription — re-parses tags and connections, preserves the original |
+| `bulk_upload` | Process a whole folder of photos at once (local OCR) |
 | `search_captures` | Full-text search with optional tag and date filters |
 | `list_by_tag` | Browse all captures with a given tag or prefix |
 | `find_connections` | Show tag-overlap and `@`-reference connections for a capture |
@@ -190,7 +225,8 @@ Once connected, talk to your AI assistant naturally.
 
 | Tool | What it does |
 |------|-------------|
-| `extract_ai_insights` | Extract confidence-scored insights from an AI research session transcript — with user review before any DB write |
+| `extract_insights` | Prepare an AI research session for insight extraction — loads knowledge-base context, no DB write |
+| `commit_aiex` | Store the reviewed, confirmed insights as AIEX entries after your approval |
 
 ---
 
@@ -223,10 +259,13 @@ Use these prefixes anywhere on your journal pages — the server extracts them a
 ## Troubleshooting
 
 **"Tesseract OCR is not installed"**
-Install Tesseract (Step 2 above) and restart your AI client.
+You called `upload_capture`/`bulk_upload`, which need the optional local OCR engine. Either install Tesseract ([Optional: offline OCR](#optional-offline-ocr-tesseract)) and restart your AI client — or skip it entirely: share the photo in chat and ask your assistant to read and store the page instead.
 
 **"Could not detect a template ID"**
-Make sure the template number (RC-001, SYN-001, etc.) is clearly visible in the photo. Try better lighting or a closer shot.
+Make sure the template number (RC-001, SYN-001, etc.) is clearly visible in the photo. Try better lighting or a closer shot — or tell your assistant the ID directly ("this is RC-001") and it can pass `template_id` explicitly.
+
+**OCR got the text wrong**
+Ask your assistant to fix it with `correct_ocr` — give it the capture number and the corrected text. The original read is preserved, and tags and connections are rebuilt from the correction.
 
 **"RC-001 already exists in your knowledge base"**
 You're re-uploading a page that's already stored. To replace it with the new photo (e.g. after a cleaner retake), ask your AI assistant to upload with `force=True`:

@@ -590,6 +590,31 @@ class TestSearchFts:
         assert len(results) <= 3
 
 
+class TestSearchFtsEscaping:
+    """User input must never reach the FTS5 query parser unquoted."""
+
+    def test_version_string_does_not_raise(self, db):
+        _insert_rc(db, "RC-001", raw_ocr="notes on the KSJ v2.0 upgrade path")
+        results = search_fts(db, "KSJ v2.0 upgrade")
+        assert len(results) == 1
+
+    def test_fts_operators_are_literal(self, db):
+        _insert_rc(db, "RC-001", raw_ocr="reading NEAR the window AND thinking")
+        # NEAR/AND/OR/NOT are FTS5 operators — must be treated as plain words
+        results = search_fts(db, "NEAR AND")
+        assert len(results) == 1
+
+    def test_punctuation_does_not_raise(self, db):
+        _insert_rc(db, "RC-001", raw_ocr="filename notes about config.json here")
+        for query in ("config.json", "foo*", "(parens)", 'say "hi"', "a-b c:d"):
+            search_fts(db, query)  # must not raise fts5 syntax errors
+
+    def test_empty_query_returns_empty(self, db):
+        _insert_rc(db, "RC-001", raw_ocr="anything at all")
+        assert search_fts(db, "") == []
+        assert search_fts(db, "   ") == []
+
+
 # ── get_stats ──────────────────────────────────────────────────────────────────
 
 class TestGetStats:

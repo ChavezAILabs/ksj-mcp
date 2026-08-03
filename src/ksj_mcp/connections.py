@@ -68,12 +68,13 @@ def find_reference_connections(
       {"target_id": int, "template_id": str, "strength": 1.0}
     """
     row = con.execute(
-        "SELECT raw_ocr FROM captures WHERE id=?", (capture_id,)
+        "SELECT COALESCE(corrected_ocr, raw_ocr) AS body FROM captures WHERE id=?",
+        (capture_id,),
     ).fetchone()
     if row is None:
         return []
 
-    raw_ocr = row["raw_ocr"]
+    raw_ocr = row["body"]
     refs: list[dict] = []
     seen: set[str] = set()
 

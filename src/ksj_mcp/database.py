@@ -41,6 +41,7 @@ def init_db(db_path: Path | None = None) -> None:
                 template_id TEXT NOT NULL,          -- e.g. RC-001
                 content_json TEXT NOT NULL,          -- parsed fields as JSON
                 raw_ocr     TEXT NOT NULL,
+                corrected_ocr TEXT,                  -- user-corrected transcription (raw_ocr preserved)
                 summary     TEXT NOT NULL DEFAULT '',
                 confidence  REAL NOT NULL DEFAULT 0.0,
                 image_path  TEXT NOT NULL DEFAULT '',
@@ -76,25 +77,28 @@ def init_db(db_path: Path | None = None) -> None:
                 content_rowid='id'
             );
 
-            -- Keep FTS in sync via triggers
+            -- Keep FTS in sync via triggers. The index holds the corrected
+            -- transcription when one exists; the FTS column keeps the name
+            -- raw_ocr because external-content column names must match the
+            -- content table.
             CREATE TRIGGER IF NOT EXISTS captures_fts_insert
             AFTER INSERT ON captures BEGIN
                 INSERT INTO captures_fts(rowid, raw_ocr, summary)
-                VALUES (new.id, new.raw_ocr, new.summary);
+                VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
             END;
 
             CREATE TRIGGER IF NOT EXISTS captures_fts_delete
             AFTER DELETE ON captures BEGIN
                 INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
-                VALUES ('delete', old.id, old.raw_ocr, old.summary);
+                VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
             END;
 
             CREATE TRIGGER IF NOT EXISTS captures_fts_update
             AFTER UPDATE ON captures BEGIN
                 INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
-                VALUES ('delete', old.id, old.raw_ocr, old.summary);
+                VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
                 INSERT INTO captures_fts(rowid, raw_ocr, summary)
-                VALUES (new.id, new.raw_ocr, new.summary);
+                VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
             END;
         """)
 
@@ -126,6 +130,50 @@ def insert_tags(con: sqlite3.Connection, capture_id: int, tags: list[dict]) -> N
         "INSERT INTO tags (capture_id, prefix, value) VALUES (?, ?, ?)",
         [(capture_id, t["prefix"], t["value"]) for t in tags],
     )
+
+
+def update_capture_correction(
+    con: sqlite3.Connection,
+    capture_id: int,
+    corrected_text: str,
+    content: dict[str, Any],
+    summary: str,
+    tags: list[dict],
+) -> bool:
+    """
+    Apply an OCR correction to a stored capture.
+
+    Stores *corrected_text* in corrected_ocr (raw_ocr is preserved), replaces
+    the parsed fields, summary, and tags, and removes connections derived from
+    the old text: tag-overlap edges in both directions and outbound references.
+    Inbound references from other captures stay — they cite this capture's ID,
+    which the correction does not change.
+
+    The caller should re-run build_connections() afterwards. Returns False if
+    the capture does not exist.
+    """
+    row = con.execute(
+        "SELECT id FROM captures WHERE id=?", (capture_id,)
+    ).fetchone()
+    if row is None:
+        return False
+
+    con.execute(
+        "UPDATE captures SET corrected_ocr=?, content_json=?, summary=? WHERE id=?",
+        (corrected_text, json.dumps(content), summary, capture_id),
+    )
+    con.execute("DELETE FROM tags WHERE capture_id=?", (capture_id,))
+    insert_tags(con, capture_id, tags)
+    con.execute(
+        "DELETE FROM connections WHERE type='tag_overlap' AND (source_id=? OR target_id=?)",
+        (capture_id, capture_id),
+    )
+    con.execute(
+        "DELETE FROM connections WHERE type='reference' AND source_id=?",
+        (capture_id,),
+    )
+    con.commit()
+    return True
 
 
 def insert_connection(
@@ -619,8 +667,13 @@ def search_fts(
     limit: int = 20,
 ) -> list[dict]:
     """Full-text search with optional tag and date filters."""
-    # FTS query — escape special chars for safety
-    safe_query = query.replace('"', '""')
+    # Quote every token so FTS5 operators and punctuation ('.', '-', NEAR,
+    # AND/OR, '*') in user input can't reach the query parser — a query like
+    # "KSJ v2.0 upgrade" is otherwise a syntax error.
+    tokens = query.split()
+    if not tokens:
+        return []
+    safe_query = " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
     params: list[Any] = [safe_query]
     extra_clauses = []
@@ -878,6 +931,74 @@ def migrate_fix_fk_references(db_path: Path | None = None) -> None:
             raise
     finally:
         con.execute("PRAGMA foreign_keys=ON")
+        con.close()
+
+
+def migrate_add_corrected_ocr(db_path: Path | None = None) -> None:
+    """
+    Additive migration: corrected_ocr column + FTS triggers that index the
+    corrected transcription when one exists.
+
+    Safe to call on every startup — exits immediately when already applied.
+    Must run after migrate_add_aiex / migrate_fix_fk_references, which rebuild
+    the captures table and triggers with pre-correction definitions.
+    """
+    path = db_path or _DEFAULT_DB
+    if not path.exists():
+        return
+
+    con = sqlite3.connect(str(path), isolation_level=None)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+
+    try:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(captures)").fetchall()]
+        if not cols:
+            return  # no captures table yet — init_db creates it with the column
+
+        trigger_row = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='captures_fts_update'"
+        ).fetchone()
+        triggers_current = trigger_row is not None and "corrected_ocr" in trigger_row["sql"]
+
+        if "corrected_ocr" in cols and triggers_current:
+            return
+
+        con.execute("BEGIN")
+        try:
+            if "corrected_ocr" not in cols:
+                con.execute("ALTER TABLE captures ADD COLUMN corrected_ocr TEXT")
+
+            # Recreate FTS sync triggers with COALESCE(corrected_ocr, raw_ocr).
+            # All corrected_ocr values are NULL at migration time, so the
+            # existing index contents stay valid — no rebuild needed.
+            for name in ("captures_fts_insert", "captures_fts_delete", "captures_fts_update"):
+                con.execute(f"DROP TRIGGER IF EXISTS {name}")
+            con.execute("""
+                CREATE TRIGGER captures_fts_insert AFTER INSERT ON captures BEGIN
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_delete AFTER DELETE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_update AFTER UPDATE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
+                END
+            """)
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+    finally:
         con.close()
 
 
