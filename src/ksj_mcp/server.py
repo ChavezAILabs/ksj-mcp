@@ -1,7 +1,7 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-32 tools:
+35 tools:
   export_html        — Self-contained HTML view: timeline, index, connections, graph
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
@@ -31,7 +31,10 @@ KSJ MCP Server — FastMCP entry point.
   journal_health     — KPI dashboard + coaching recommendations
   get_breakthroughs  — All SYN entries chronologically with insights
   dream_patterns     — Recurring symbols, emotions, themes across DC pages
+  dream_correlation  — Co-occurrence between DC entries and RC/REV entries sharing a tag, within a day window (descriptive only)
   knowledge_progress — REV knowledge status progression by topic
+  bridge_dream_research— Independent check for cross-domain echo + symbol-interpretation dialogue on a DC page (no DB write)
+  commit_observation — Store a confirmed bridge_dream_research dialogue outcome (a noticing, not an inference) as an AIEX entry, linked to its DC page
   extract_insights   — Load DB context for AI extraction of a research session
   commit_aiex        — Write confirmed AIEX insights to the knowledge base
 """
@@ -61,6 +64,7 @@ from .database import (
     migrate_v31,
     set_setting,
     get_dc_pattern_data,
+    get_dream_cooccurrence,
     get_journal_kpis,
     get_next_aiex_id,
     get_question_captures,
@@ -977,6 +981,9 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
       assesses   — source (an AIEX assessment entry) audits target (a REV
                    page)'s claimed knowledge status. Normally set
                    automatically by commit_assessment().
+      observes   — source (an AIEX observation entry) notes target (a DC
+                   page)'s cross-domain echo or confirmed symbol meaning.
+                   Normally set automatically by commit_observation().
 
     Automatic contradiction detection is deliberately not offered — it
     cannot be done reliably. Supersession is either asserted here by a
@@ -985,12 +992,12 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
 
     Args:
         source_id: The newer / asserting capture (numeric ID).
-        target_id: The capture being superseded / refuted / supported / distilled / assessed.
-        relation:  supersedes | refutes | narrows | supports | distills | assesses
+        target_id: The capture being superseded / refuted / supported / distilled / assessed / observed.
+        relation:  supersedes | refutes | narrows | supports | distills | assesses | observes
         note:      Optional one-line reason, stored on the edge.
     """
     relation = relation.strip().lower()
-    valid = {"supersedes", "refutes", "narrows", "supports", "distills", "assesses"}
+    valid = {"supersedes", "refutes", "narrows", "supports", "distills", "assesses", "observes"}
     if relation not in valid:
         return f"Unknown relation {relation!r} — use one of: {', '.join(sorted(valid))}."
     if source_id == target_id:
@@ -2596,6 +2603,78 @@ def dream_patterns() -> str:
     return "\n".join(lines)
 
 
+# ── Tool: dream_correlation ───────────────────────────────────────────────────
+
+@mcp.tool()
+def dream_correlation(tag: str, window_days: int = 3) -> str:
+    """
+    Report co-occurrence between Dream Capture entries and RC/REV entries
+    sharing #tag, within window_days of each other. Descriptive only.
+
+    This deliberately never uses the word "correlation" in its own output
+    (window size is a free parameter, and with a small journal, trying a
+    few window widths will surface something that looks meaningful — the
+    same researcher-degrees-of-freedom failure mode your own experimental
+    methodology is built to defeat). Every result reports window_days, the
+    match count, and the base rate of #tag in each population, so a
+    coincidence and a pattern don't read the same on the page.
+
+    Args:
+        tag:         The # topic/theme tag to check (e.g. "resilience").
+                     Matched against DC's #theme tags and RC/REV's #topic
+                     tags — same prefix, same normalized value, different
+                     template role.
+        window_days: How many days apart counts as "near" (default 3).
+                     Symmetric — checks both before and after each dream.
+    """
+    tag = tag.strip().lstrip("#")
+    if not tag:
+        return 'Please provide a tag, e.g. dream_correlation(tag="resilience").'
+    if window_days < 0:
+        return "window_days must be 0 or greater."
+
+    with _db() as con:
+        data = get_dream_cooccurrence(con, tag, window_days)
+
+    dc_n, other_n = len(data["dc_matches"]), len(data["other_matches"])
+    dc_rate    = f"{dc_n}/{data['dc_total']} ({dc_n / data['dc_total']:.0%})" if data["dc_total"] else "0/0"
+    other_rate = f"{other_n}/{data['other_total']} ({other_n / data['other_total']:.0%})" if data["other_total"] else "0/0"
+
+    lines = [
+        f"Dream Co-occurrence — #{tag}, window = {window_days} day(s)\n" + "─" * 50,
+        f"\n#{tag} appears in {dc_rate} DC entries, {other_rate} RC/REV entries (base rate).",
+        f"Matched pairs within the window: n = {len(data['pairs'])}.",
+    ]
+
+    if not data["dc_matches"]:
+        lines.append(f"\nNo DC entries carry #{tag} — nothing to check co-occurrence against.")
+        return "\n".join(lines)
+    if not data["other_matches"]:
+        lines.append(f"\nNo RC/REV entries carry #{tag} — nothing for the dreams to co-occur with.")
+        return "\n".join(lines)
+
+    if data["pairs"]:
+        lines.append(f"\nPairs (dream ↔ RC/REV entry, both within {window_days} day(s)):")
+        for p in sorted(data["pairs"], key=lambda p: p["day_gap"]):
+            lines.append(
+                f"  {p['dc_template']}  ↔  {p['other_template']} ({p['other_type']})  "
+                f"— {p['day_gap']} day(s) {p['direction']}"
+            )
+    else:
+        lines.append(f"\nNo pairs fell within {window_days} day(s) — the entries exist but don't land near each other in time.")
+
+    lines.append(
+        f"\nThese are plain co-occurrence counts — descriptive only, no test of "
+        f"whether the timing is more than chance, and no significance claim of any "
+        f"kind. A base rate this high on either side would make near-simultaneous "
+        f"entries unsurprising regardless of any deeper connection. If you're "
+        f"checking several window_days values in this session, say so when you "
+        f"report the result — that's the exact kind of researcher-degrees-of-freedom "
+        f"search this framing exists to make visible."
+    )
+    return "\n".join(lines)
+
+
 # ── Tool: knowledge_progress ──────────────────────────────────────────────────
 
 @mcp.tool()
@@ -2978,6 +3057,330 @@ def commit_assessment(assessment_json: str) -> str:
         if len(connections) > 10:
             lines.append(f"  … and {len(connections) - 10} more")
     lines.append(f"\nLinked to {rev_template_id} with an 'assesses' edge (asserted).")
+    lines.append("Stored as type=AIEX (AI-Extracted; excluded from journal_health KPIs).")
+    return "\n".join(lines)
+
+
+# ── Tool: bridge_dream_research ───────────────────────────────────────────────
+
+@mcp.tool()
+def bridge_dream_research(dc_template_id: str, window_days: int = 3, depth: str = "standard") -> str:
+    """
+    Independently check a Dream Capture entry for cross-domain echo — RC/REV
+    entries sharing a theme within a few days of the dream — and prepare a
+    dialogue over what, if anything, the dream's symbols mean to you.
+
+    This runs AFTER a DC page exists — never before; there's nothing to
+    bridge until a dream has actually been recorded. If no DC page is
+    found, the tool declines. Reuses dream_correlation()'s co-occurrence
+    data (chain 1: composed, not reimplemented) for the cross-domain-echo
+    half, so the same non-negotiable guardrails apply here too: these are
+    plain co-occurrence counts, never "correlation," always reported with
+    window_days, match count, and base rate.
+
+    This tool does NOT write to the database — it prepares the findings
+    and dialogue instructions for Claude to run in this conversation. Call
+    `commit_observation()` after the user reviews the outcome, to persist
+    it. Never changes the DC page's own dream narrative — that stays
+    physical-authority, exactly like surface_connections never rewrites a
+    SYN page. The artifact this tool exists to produce is a *noticing*,
+    not a conclusion — at journal scale this dialogue cannot support
+    calling its output an inference — and never a restatement of the
+    dream (already stored) or an asserted claim about what a symbol means
+    (that's the user's call, always asked, never proposed).
+
+    Trigger phrases: "Bridge DC-005 to my research", "What does this dream
+    connect to?".
+
+    Args:
+        dc_template_id: The DC page's template ID (e.g. "DC-005").
+                        Required — the tool declines if no DC page with
+                        this ID exists.
+        window_days:    How many days apart counts as "near," for the
+                        cross-domain-echo check (default 3).
+        depth:          "brief" | "standard" (default) | "deep" — how many
+                        follow-up questions per topic to plan for. The
+                        user can also say "more on this one" for any
+                        single topic regardless of depth.
+
+    Returns the dream's own content, cross-domain echoes, and dialogue
+    instructions for Claude to execute.
+    """
+    dc_template_id = dc_template_id.strip().upper()
+    if not dc_template_id:
+        return 'Please provide the DC page\'s template ID, e.g. bridge_dream_research(dc_template_id="DC-005").'
+
+    depth = depth.strip().lower()
+    if depth not in ("brief", "standard", "deep"):
+        depth = "standard"
+
+    with _db() as con:
+        dc_cap = get_capture_by_template(con, dc_template_id, type_="DC")
+        if dc_cap is None:
+            return (
+                f"No Dream Capture page found for {dc_template_id}.\n\n"
+                "bridge_dream_research checks a recorded dream for echoes in the rest "
+                "of the journal — it runs after the DC page, not before. "
+                "dream_patterns() shows your existing dream entries."
+            )
+
+        content   = dc_cap.get("content") or {}
+        narrative = content.get("dream_narrative", "")
+        symbols   = content.get("symbols", "")
+        emotions  = content.get("emotions", "")
+        current_events = content.get("current_events", "")
+
+        ocr_warning = ""
+        if not dc_cap.get("corrected_ocr") and dc_cap.get("confidence", 1.0) < 0.6:
+            ocr_warning = (
+                f"\n⚠ {dc_template_id}'s transcription is uncorrected and "
+                f"low-confidence ({dc_cap.get('confidence', 0.0):.0%}). The narrative "
+                "and tags below may be misread — consider correct_ocr() first.\n"
+            )
+
+        themes  = sorted({t["display"] or t["value"] for t in dc_cap["tags"] if t["prefix"] == "#"})
+        symbol_tags = sorted({t["display"] or t["value"] for t in dc_cap["tags"] if t["prefix"] == "@"})
+
+        echo_blocks = []
+        any_pairs = False
+        for theme in themes:
+            data = get_dream_cooccurrence(con, theme, window_days)
+            my_pairs = [p for p in data["pairs"] if p["dc_id"] == dc_cap["id"]]
+            dc_n, other_n = len(data["dc_matches"]), len(data["other_matches"])
+            dc_rate    = f"{dc_n}/{data['dc_total']} ({dc_n / data['dc_total']:.0%})" if data["dc_total"] else "0/0"
+            other_rate = f"{other_n}/{data['other_total']} ({other_n / data['other_total']:.0%})" if data["other_total"] else "0/0"
+            pair_word = "pair" if len(my_pairs) == 1 else "pairs"
+            block = [
+                f"### #{theme}\n{len(my_pairs)} matched {pair_word} at ±{window_days} day(s), "
+                f"and #{theme} appears in {dc_rate} DC entries, {other_rate} RC/REV entries overall (base rate)."
+            ]
+            if my_pairs:
+                any_pairs = True
+                for p in sorted(my_pairs, key=lambda p: p["day_gap"]):
+                    block.append(f"  - {p['other_template']} ({p['other_type']}) — {p['day_gap']} day(s) {p['direction']}: {p['other_summary'] or ''}")
+            echo_blocks.append("\n".join(block) + "\n")
+
+    depth_guidance = {
+        "brief":    "Ask at most one question per topic unless the user asks for more.",
+        "standard": "Ask one to two questions per topic.",
+        "deep":     "Ask up to three or four questions per topic, and proactively "
+                    "check whether any single one deserves more.",
+    }[depth]
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    return f"""## bridge_dream_research — {dc_template_id}
+Themes: {', '.join(f'#{t}' for t in themes) or '(none tagged)'} · Symbols: {', '.join(f'@{s}' for s in symbol_tags) or '(none tagged)'}{ocr_warning}
+
+---
+
+## PART A — the dream itself
+
+Narrative: {narrative or '(not recorded)'}
+Symbols: {symbols or '(not recorded)'}
+Emotions: {emotions or '(not recorded)'}
+Current events: {current_events or '(not recorded)'}
+
+---
+
+## PART B — cross-domain echo (plain co-occurrence counts only)
+
+These are plain co-occurrence counts — descriptive only, no test of whether
+the timing is more than chance, and no significance claim of any kind. A
+base rate this high on either side would make near-simultaneous entries
+unsurprising regardless of any deeper connection.
+
+{chr(10).join(echo_blocks) if echo_blocks else "(no #theme tags on this entry — nothing to check for echo)"}
+
+---
+
+## INSTRUCTIONS
+
+Present the dream (Part A) and the echo findings (Part B) to the user.
+{"Then conduct a dialogue, one question at a time, over two things: (1) whether any cross-domain echo above feels like a real connection, not just timing, and (2) what the dream's own symbols mean to the user, if anything — ask about this even if Part B found nothing, since symbol interpretation doesn't depend on any RC/REV echo existing." if (any_pairs or symbol_tags) else "No echoes were found and no symbols were tagged — there may be little to dialogue about. Ask the user if there's anything about this dream they want to reflect on anyway."}
+
+Ask, never propose — a question makes the user think; a proposed meaning
+makes you think, in their place. This matters MORE here than elsewhere:
+symbol interpretation is inherently personal, and there is no evidence
+that could make an AI-proposed meaning correct. Restate this to yourself
+before EVERY question. Do not ask more than 3 consecutive follow-up
+questions on the same topic.
+
+Depth: {depth}. {depth_guidance} At any point the user can say "more on this
+one" for a follow-up on a specific topic, regardless of depth.
+
+The dialogue ends when the user says "done" or all topics are covered.
+
+---
+
+## OUTPUT — after the dialogue
+
+Write a short observation (2-5 sentences): what the dialogue revealed, not
+a restatement of the dream (already stored on {dc_template_id}) and not an
+assertion about what a symbol universally means — only what the user
+confirmed it means to them, and what connection (if any) they confirmed
+as real rather than coincidental timing. Call it an observation because
+that's what it is at this scale — a noticing, not a conclusion.
+
+Present it to the user, and only after they approve, call `commit_observation()`:
+
+```json
+{{
+  "dc_template_id": "{dc_template_id}",
+  "date": "{today}",
+  "observation": "<2-5 sentences: what the dialogue revealed>",
+  "confirmed_echoes": ["<RC/REV connection the user confirmed as meaningful>"],
+  "symbol_notes": ["<symbol: what the user says it means to them>"],
+  "tags": ["#topic1"]
+}}
+```
+
+No database write occurs until `commit_observation()` is called with confirmed data."""
+
+
+# ── Tool: commit_observation ──────────────────────────────────────────────────
+
+@mcp.tool()
+def commit_observation(observation_json: str) -> str:
+    """
+    Store the confirmed outcome of a bridge_dream_research() dialogue.
+
+    Named "observation," not "inference": at journal scale (routinely a
+    handful of DC entries, sometimes one), what this dialogue produces is
+    a noticing, not a conclusion the data could support calling an
+    inference. Call this after the dialogue concludes and the user has
+    reviewed the observation. Only the observation — what the dialogue
+    revealed, not a restatement of the dream or an asserted symbol
+    meaning — is stored as the entry's text.
+
+    Never changes the bridged DC page's own dream narrative — that stays
+    physical-authority, exactly like commit_distillation never rewrites a
+    SYN page. Stores with source='ai_extract' (excluded from journal_health
+    KPIs) using the AIEX sequence, and links to the DC page with an
+    asserted 'observes' edge.
+
+    Args:
+        observation_json: JSON string with fields:
+          dc_template_id (required) — the DC page this observes.
+          observation      (required) — 2-5 sentences: what the dialogue
+                           revealed. This is the artifact.
+          confirmed_echoes, symbol_notes — lists of strings (both
+                           optional, default empty).
+          tags             — optional list of "#topic"/"@source"/etc strings.
+          date             — optional ISO date; defaults to today.
+
+    Returns a confirmation with the assigned AIEX ID and the observes edge.
+    """
+    try:
+        data = json.loads(observation_json)
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}\n\nMake sure to pass a valid JSON string."
+
+    dc_template_id = (data.get("dc_template_id") or "").strip().upper()
+    observation    = (data.get("observation") or "").strip()
+
+    if not dc_template_id:
+        return "observation_json must include dc_template_id — the DC page this observes."
+    if not observation:
+        return (
+            "observation_json must include a non-empty 'observation' field — "
+            "what the dialogue revealed, not a restatement of the dream."
+        )
+
+    date              = data.get("date") or datetime.now(timezone.utc).date().isoformat()
+    confirmed_echoes  = data.get("confirmed_echoes", [])
+    symbol_notes      = data.get("symbol_notes", [])
+    tag_strings       = data.get("tags", [])
+
+    with _db() as con:
+        dc_cap = get_capture_by_template(con, dc_template_id, type_="DC")
+        if dc_cap is None:
+            return (
+                f"No Dream Capture page found for {dc_template_id} — commit_observation "
+                "links to an existing DC page and never creates one. Check the template ID."
+            )
+
+        content = {
+            "observation":      observation,
+            "dc_template_id":   dc_template_id,
+            "date":             date,
+            "confirmed_echoes": confirmed_echoes,
+            "symbol_notes":     symbol_notes,
+        }
+
+        tags: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for tag_str in tag_strings:
+            tag_str = tag_str.strip()
+            if len(tag_str) < 2:
+                continue
+            if tag_str[0] in ('#', '@', '!', '?', '$', '*'):
+                prefix, raw_value = tag_str[0], tag_str[1:]
+            else:
+                prefix, raw_value = '#', tag_str
+            value = normalize_tag_value(raw_value)
+            if not value:
+                continue
+            key = (prefix, value)
+            if key not in seen:
+                seen.add(key)
+                tags.append({
+                    "prefix":  prefix,
+                    "value":   value,
+                    "display": raw_value,
+                    "role":    assign_role(prefix, value, "AIEX"),
+                })
+        for t in extract_schema_tags(observation, "AIEX"):
+            key = (t["prefix"], t["value"])
+            if key not in seen:
+                seen.add(key)
+                tags.append(t)
+
+        aiex_id    = get_next_aiex_id(con)
+        capture_id = insert_capture(
+            con,
+            type_="AIEX",
+            template_id=aiex_id,
+            content=content,
+            raw_ocr=observation,
+            summary=observation[:200],
+            confidence=1.0,
+            image_path="",
+            source="ai_extract",
+        )
+        insert_tags(con, capture_id, tags)
+        con.commit()
+
+        connections = build_connections(con, capture_id)
+
+        # Same reasoning as commit_distillation's 'distills' edge and
+        # commit_assessment's 'assesses' edge: asserted_by='user' because
+        # the human approved this by confirming the dialogue's outcome,
+        # and rebuild_connections() deletes every edge WHERE asserted_by
+        # != 'user' with nothing to re-derive this one from tags/text.
+        insert_connection(
+            con, capture_id, dc_cap["id"], "asserted", 1.0, "asserted",
+            relation="observes", asserted_by="user",
+        )
+        con.commit()
+
+    tag_str = ", ".join(f"{t['prefix']}{t['value']}" for t in tags) or "none"
+    lines = [
+        f"Observation Commit — {aiex_id} (#{capture_id})\n{'─' * 40}",
+        f"  Observes : {dc_template_id}",
+        f"  Date     : {date}",
+        f"  Tags     : {tag_str}",
+        f"\n{observation}",
+        f"\nConfirmed echoes: {', '.join(confirmed_echoes) if confirmed_echoes else '(none)'}",
+        f"Symbol notes    : {', '.join(symbol_notes) if symbol_notes else '(none)'}",
+    ]
+    if connections:
+        lines.append(f"\n{len(connections)} connection(s) detected on commit:")
+        for c in connections[:10]:
+            shared = f" (shared: {', '.join(c['shared_tags'])})" if c.get("shared_tags") else ""
+            lines.append(f"  → {c['connected_template']} [{c['method']}]{shared}")
+        if len(connections) > 10:
+            lines.append(f"  … and {len(connections) - 10} more")
+    lines.append(f"\nLinked to {dc_template_id} with an 'observes' edge (asserted).")
     lines.append("Stored as type=AIEX (AI-Extracted; excluded from journal_health KPIs).")
     return "\n".join(lines)
 

@@ -70,7 +70,7 @@ def init_db(db_path: Path | None = None) -> None:
                 type        TEXT NOT NULL,           -- tag_overlap | entity_overlap | reference | asserted
                 strength    REAL NOT NULL DEFAULT 1.0,
                 method      TEXT NOT NULL,
-                relation    TEXT,                    -- supersedes | refutes | narrows | supports | distills | assesses (asserted only)
+                relation    TEXT,                    -- supersedes | refutes | narrows | supports | distills | assesses | observes (asserted only)
                 note        TEXT,                    -- optional human annotation
                 asserted_by TEXT NOT NULL DEFAULT 'derived'  -- 'derived' | 'user'
             );
@@ -954,6 +954,74 @@ def get_topic_evidence_gaps(con: sqlite3.Connection, topic: str) -> dict:
     ).fetchall()]
 
     return {"open_questions": open_questions, "uncited_insights": uncited_insights}
+
+
+def get_dream_cooccurrence(con: sqlite3.Connection, tag: str, window_days: int) -> dict:
+    """
+    Co-occurrence data between DC captures and RC/REV captures sharing
+    #tag, within window_days of each other in either direction. Computed
+    once here and shared by dream_correlation() and bridge_dream_research()
+    (chain 1: composed, not reimplemented in the companion tool) — see
+    ksj-mcp_SPEC_3.0_3.1_2026-08-02.md §1.10a(c) for the non-negotiable
+    guardrails this exists to support: report base rates, report
+    window_days + match count, never call this "correlation" in output text.
+    """
+    dc_rows = [dict(r) for r in con.execute(
+        """SELECT DISTINCT c.id, c.template_id, c.created_at, c.summary
+           FROM captures c JOIN tags t ON t.capture_id = c.id
+           WHERE c.type='DC' AND c.valid_until IS NULL
+             AND t.prefix='#' AND LOWER(t.value)=LOWER(?)
+           ORDER BY c.created_at""",
+        (tag,),
+    ).fetchall()]
+    other_rows = [dict(r) for r in con.execute(
+        """SELECT DISTINCT c.id, c.template_id, c.type, c.created_at, c.summary
+           FROM captures c JOIN tags t ON t.capture_id = c.id
+           WHERE c.type IN ('RC','REV') AND c.valid_until IS NULL
+             AND t.prefix='#' AND LOWER(t.value)=LOWER(?)
+           ORDER BY c.created_at""",
+        (tag,),
+    ).fetchall()]
+
+    dc_total = con.execute(
+        "SELECT COUNT(*) AS n FROM captures WHERE type='DC' AND valid_until IS NULL"
+    ).fetchone()["n"]
+    other_total = con.execute(
+        "SELECT COUNT(*) AS n FROM captures WHERE type IN ('RC','REV') AND valid_until IS NULL"
+    ).fetchone()["n"]
+
+    pairs = []
+    for dc in dc_rows:
+        dc_dt = datetime.fromisoformat(dc["created_at"])
+        for other in other_rows:
+            other_dt = datetime.fromisoformat(other["created_at"])
+            # Calendar-date difference, not elapsed-time truncation: two
+            # entries on consecutive calendar dates but <24h apart (e.g.
+            # 11pm and 1am) should read as 1 day apart, not 0 — matching
+            # how a journal-keeper would actually describe the gap.
+            gap_days = abs((dc_dt.date() - other_dt.date()).days)
+            if gap_days <= window_days:
+                pairs.append({
+                    "dc_id": dc["id"], "dc_template": dc["template_id"],
+                    "other_id": other["id"], "other_template": other["template_id"],
+                    "other_type": other["type"], "other_summary": other["summary"],
+                    "day_gap": gap_days,
+                    "direction": (
+                        "before" if other_dt < dc_dt
+                        else "after" if other_dt > dc_dt
+                        else "same day"
+                    ),
+                })
+
+    return {
+        "tag": tag,
+        "window_days": window_days,
+        "dc_matches": dc_rows,
+        "other_matches": other_rows,
+        "pairs": pairs,
+        "dc_total": dc_total,
+        "other_total": other_total,
+    }
 
 
 # ── Search ─────────────────────────────────────────────────────────────────────

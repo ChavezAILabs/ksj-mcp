@@ -252,7 +252,7 @@ Once connected, talk to your AI assistant naturally.
 | `bulk_upload` | Process a whole folder of photos at once (local OCR) |
 | `set_volume` | Multiple journals: set which book new captures go into and which books search sees |
 | `assert_entity` | Link a named entity (person, place, work, dream symbol) to a capture |
-| `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports / distills / assesses another — superseded claims are kept in history but leave current search |
+| `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports / distills / assesses / observes another — superseded claims are kept in history but leave current search |
 | `rebuild_connections` | Re-derive the connection graph from current tags and text (asserted edges are never touched) |
 | `find_path` | Shortest chain of connections between two captures |
 | `neighborhood` | Everything within N hops of a capture — its local knowledge cluster |
@@ -272,9 +272,12 @@ Once connected, talk to your AI assistant naturally.
 | `journal_health` | KPI dashboard + coaching: velocity, synthesis ratio, review cadence, open questions |
 | `get_breakthroughs` | All SYN entries chronologically — your complete breakthrough timeline |
 | `dream_patterns` | Recurring symbols, emotions, motifs, and themes across DC pages |
+| `dream_correlation` | Co-occurrence between DC entries and RC/REV entries sharing a tag, within a day window — descriptive only: always reports the window, match count, and base rate, never claims "correlation" or significance |
 | `knowledge_progress` | Track Needs Work → Solid → Mastered progression from REV entries |
 | `audit_knowledge_status` | Independently check a REV page's claimed status against evidence (open questions, uncited insights), then run a structured dialogue over anything that doesn't line up — runs after the page exists, never before; no DB write |
 | `commit_assessment` | Store the confirmed outcome of an `audit_knowledge_status` dialogue as an AIEX entry, linked to its REV page with an asserted `assesses` edge — never changes the REV page's own claimed status |
+| `bridge_dream_research` | Independently check a DC page for cross-domain echo (via `dream_correlation`) and prepare a dialogue over what its symbols mean to you — runs after the page exists, never before; no DB write |
+| `commit_observation` | Store the confirmed outcome of a `bridge_dream_research` dialogue as an AIEX entry, linked to its DC page with an asserted `observes` edge — never changes the DC page's own dream narrative |
 
 ### AI session tools
 

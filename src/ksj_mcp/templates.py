@@ -232,6 +232,12 @@ def parse_dc(text: str) -> dict[str, Any]:
         "dream_narrative": _extract_section(text, "narrative", "dream narrative", "dream"),
         "symbols": _extract_section(text, "symbols", "symbol"),
         "emotions": _extract_section(text, "emotions", "emotion"),
+        # §1.4a: the 2026-04 print revision renamed this section from
+        # "Yesterday" to "Current Events" — parse the current label, fall
+        # back to the retired one so the one pre-revision capture still
+        # parses. No alias table needed; _extract_section already tries
+        # headers in order.
+        "current_events": _extract_section(text, "current events", "yesterday"),
         "tags_raw": _extract_section(text, "tags", "tag"),
     }
 

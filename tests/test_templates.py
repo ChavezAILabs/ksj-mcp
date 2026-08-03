@@ -242,6 +242,36 @@ class TestParseDC:
         result = parse_dc(self.SAMPLE)
         assert "Wonder" in result["emotions"]
 
+    def test_current_events_extracted(self):
+        text = (
+            "DC-002\n"
+            "Narrative:\nSomething strange\n"
+            "Current Events:\nDeep in a research push on convergence proofs\n"
+            "Symbols:\nNone\n"
+            "Emotions:\nCurious\n"
+            "Tags:\n#research\n"
+        )
+        result = parse_dc(text)
+        assert "convergence proofs" in result["current_events"]
+
+    def test_current_events_falls_back_to_legacy_yesterday_label(self):
+        """§1.4a: the 2026-04 print revision renamed "Yesterday" to "Current
+        Events" — the one pre-revision capture must still parse."""
+        text = (
+            "DC-000\n"
+            "Narrative:\nAn old-template dream\n"
+            "Yesterday:\nSpent all day debugging the sedenion code\n"
+            "Symbols:\nNone\n"
+            "Emotions:\nFrustrated\n"
+            "Tags:\n#debugging\n"
+        )
+        result = parse_dc(text)
+        assert "debugging the sedenion code" in result["current_events"]
+
+    def test_current_events_absent_when_no_section(self):
+        result = parse_dc(self.SAMPLE)
+        assert result["current_events"] == ""
+
 
 # ── parse_template dispatcher ─────────────────────────────────────────────────
 
