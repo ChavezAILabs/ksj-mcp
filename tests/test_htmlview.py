@@ -93,6 +93,12 @@ class TestRenderHtml:
         assert "unique-marker-text" in html
         assert html.startswith("<!DOCTYPE html>")
 
+    def test_graph_caption_present(self, db):
+        _cap(db, "RC-001")
+        html = render_html(collect_view_data(db))
+        assert 'class="graph-caption"' in html
+        assert "How to read this" in html
+
     def test_script_injection_escaped(self, db):
         _cap(db, "RC-001", raw="evil </script><script>alert(1)</script> content")
         html = render_html(collect_view_data(db))

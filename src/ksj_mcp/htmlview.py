@@ -311,6 +311,8 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .edge.e-rod { stroke: var(--type-dc) !important; stroke-width: 1.8 !important;
   stroke-opacity: .55 !important; stroke-dasharray: none !important; }
 .edge.dimmed { stroke-opacity: .08 !important; }
+.graph-caption { color: var(--muted); font-size: .8rem; line-height: 1.5; margin-bottom: 8px; }
+.graph-caption strong { color: var(--ink); }
 .graph-summary { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
   padding: 10px 14px; margin-bottom: 10px; font-size: .86rem; color: var(--ink); line-height: 1.6; }
 .graph-tooltip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
@@ -388,6 +390,12 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
     <div id="view-timeline"></div>
     <div id="view-index" style="display:none"></div>
     <div id="view-graph" style="display:none">
+      <div class="graph-caption">
+        <strong>How to read this:</strong> position shows how connected a capture is —
+        the most-connected capture sits front-and-center on the equator; everyone else
+        spirals outward from there. Bigger nodes also mean more connections. Drag
+        anywhere to spin the globe, click a node for details.
+      </div>
       <div id="graph-summary" class="graph-summary"></div>
       <svg id="graph-svg" viewBox="0 0 900 560" preserveAspectRatio="xMidYMid meet"
         aria-label="Connection graph">
