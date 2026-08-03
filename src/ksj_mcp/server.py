@@ -1,7 +1,8 @@
 """
 KSJ MCP Server — FastMCP entry point.
 
-27 tools:
+28 tools:
+  export_html        — Self-contained HTML view: timeline + tag/entity index
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
   neighborhood       — Everything within N hops of a capture
@@ -64,6 +65,7 @@ from .database import (
     get_syn_breakthroughs,
     init_db,
     insert_capture,
+    insert_connection,
     insert_tags,
     list_captures,
     migrate_add_aiex,
@@ -81,6 +83,7 @@ from .connections import (
     rebuild_connections as db_rebuild_connections,
     run_lint,
 )
+from .htmlview import collect_view_data, render_html
 from .ocr import (
     CloudOcrConfigError,
     OcrNotAvailableError,
@@ -1234,6 +1237,50 @@ def import_backup(file_path: str) -> str:
         f"  Asserted edges    : {stats['asserted_edges']}\n"
         f"Connection graph rebuilt over the merged base "
         f"({rebuild['edges']} edge(s) total)."
+    )
+
+
+# ── Tool: export_html ─────────────────────────────────────────────────────────
+
+@mcp.tool()
+def export_html(file_path: str = "") -> str:
+    """
+    Write a self-contained HTML view of the knowledge base — a bird's-eye
+    browser for the whole journal that opens in any web browser, works
+    offline, and needs no install.
+
+    Two overview modes:
+      Timeline — every capture chronologically, with live search and
+                 type / volume / journal-vs-AI filters; superseded captures
+                 hidden behind a toggle.
+      Index    — tags grouped by meaning (topics, dream themes, open
+                 questions, insights, motifs, sensory details) plus the
+                 entity register; every entry click-filters the timeline.
+
+    All data is inlined in the file: sharing or archiving the file shares a
+    snapshot of the knowledge base.
+
+    Args:
+        file_path: Where to write. Default: ksj-view.html in the KSJ data
+                   directory.
+    """
+    with _db() as con:
+        data = collect_view_data(con)
+        html = render_html(data)
+
+    path = Path(file_path.strip()) if file_path.strip() else _data_dir() / "ksj-view.html"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(html, encoding="utf-8")
+    except OSError as e:
+        return f"Could not write {path}: {e}"
+
+    n = len(data["captures"])
+    return (
+        f"HTML view written: {path}\n"
+        f"  {n} capture(s), {len(data['entities'])} entit(ies), "
+        f"{len(html) // 1024} KB — open it in any browser.\n"
+        f"Regenerate after new uploads to refresh the snapshot."
     )
 
 
