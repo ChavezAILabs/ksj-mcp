@@ -4,6 +4,8 @@
 
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
+**Current release: ksj-mcp v3.4.0** · built on **MCP SDK v2.0.0**
+
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
 
 > "Works great on paper. Magical with AI."
