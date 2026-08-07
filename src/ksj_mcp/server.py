@@ -1,7 +1,8 @@
 """
-KSJ MCP Server — FastMCP entry point.
+KSJ MCP Server — MCPServer entry point.
 
-35 tools:
+36 tools:
+  get_version        — Running ksj-mcp/mcp/pydantic/python versions (confirm an install/upgrade)
   export_html        — Self-contained HTML view: timeline, index, connections, graph
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
@@ -42,10 +43,12 @@ KSJ MCP Server — FastMCP entry point.
 import json
 import os
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .database import (
     check_duplicate,
@@ -106,7 +109,7 @@ from .templates import assign_role, extract_schema_tags, normalize_tag_value, pa
 
 # ── Server init ───────────────────────────────────────────────────────────────
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="ksj",
     instructions="""
 You are an AI assistant integrated with the Knowledge Synthesis Journal
@@ -1577,6 +1580,29 @@ def get_stats() -> str:
         f"Top tags:\n{top_tags or '  (none yet)'}\n\n"
         f"Date range: {date_str}"
         + scope_note
+    )
+
+
+# ── Tool: get_version ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def get_version() -> str:
+    """
+    Report the running ksj-mcp version and key dependency versions
+    (mcp, pydantic, python). Use this to confirm an install or upgrade
+    actually took effect.
+    """
+    def _v(pkg: str) -> str:
+        try:
+            return _pkg_version(pkg)
+        except PackageNotFoundError:
+            return "unknown"
+
+    return (
+        f"ksj-mcp {_v('ksj-mcp')}\n"
+        f"  mcp      : {_v('mcp')}\n"
+        f"  pydantic : {_v('pydantic')}\n"
+        f"  python   : {sys.version.split()[0]}"
     )
 
 

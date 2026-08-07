@@ -294,6 +294,7 @@ Once connected, talk to your AI assistant naturally.
 
 | Tool | What it does |
 |------|-------------|
+| `get_version` | Report the running ksj-mcp, mcp, pydantic, and Python versions — confirms an install or upgrade actually took effect |
 | `manual_capture` | Store a page your assistant transcribed with vision — the primary capture path |
 | `upload_capture` | OCR a journal photo locally (Tesseract), parse the template, store it, highlight strongest connection |
 | `correct_ocr` | Replace a stored capture's text with a corrected transcription — re-parses tags and connections, preserves the original |

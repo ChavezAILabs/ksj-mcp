@@ -1,2 +1,2 @@
 # KSJ MCP Server — Knowledge Synthesis Journal companion
-__version__ = "0.1.0"
+__version__ = "3.4.0"
