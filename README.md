@@ -1,16 +1,35 @@
 # KSJ MCP Server
 
-<img src="docs/cover.jpg" alt="Knowledge Synthesis Journal v2.0 cover" width="265" height="342" align="right">
+<p align="center">
+  <a href="https://www.amazon.com/dp/B0GPW5WBZL">
+    <img src="docs/cover.jpg" alt="Knowledge Synthesis Journal v2.0 cover" width="265" height="342">
+  </a>
+</p>
 
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
-**Current release: ksj-mcp v3.4.0** · built on **MCP SDK v2.0.0**
+**Current release: ksj-mcp v3.5.0** · built on **MCP SDK v2.0.0**
 
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
 
 > "Works great on paper. Magical with AI."
 
 **Get the journal:** [Knowledge Synthesis Journal v2.0 on Amazon](https://www.amazon.com/dp/B0GPW5WBZL)
+
+---
+
+## Contents
+
+- [What it does](#what-it-does)
+- [AI platform support](#ai-platform-support)
+- [Setup (3 steps)](#setup-3-steps)
+- [Usage](#usage)
+- [Available tools](#available-tools)
+- [Schema tag system](#schema-tag-system)
+- [Multiple journals (volumes)](#multiple-journals-volumes)
+- [Troubleshooting](#troubleshooting)
+- [Data location](#data-location)
+- [License](#license)
 
 ---
 
@@ -44,7 +63,7 @@ read is preserved.
 
 ### AI research sessions → structured insights
 
-Spend an hour going deep on a topic with an AI assistant and most of that thinking vanishes when the chat ends. `extract_ai_insights` fixes that — paste or pipe a session transcript and the server extracts what matters:
+Spend an hour going deep on a topic with an AI assistant and most of that thinking vanishes when the chat ends. `extract_insights` fixes that — paste or pipe a session transcript and the server extracts what matters:
 
 - Novel hypotheses and seed ideas
 - Unexpected connections between concepts
@@ -97,7 +116,7 @@ but is **off unless you explicitly enable it** with your own key.
 
 ---
 
-## AI Platform Support
+## AI platform support
 
 This server uses **MCP (Model Context Protocol)**, an open standard with growing support across AI platforms and developer tools.
 
@@ -138,16 +157,16 @@ Verify with `uv --version` in a terminal before continuing.
 
 **Install the KSJ server** (run once in a terminal):
 
-```
+```bash
 uv tool install --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
 ```
 
 This installs `ksj-mcp` as a persistent command on your machine. Git must be installed for this step (Windows: [Git for Windows](https://git-scm.com/download/win)).
 
-Verify with `ksj-mcp --help` — if it shows a help message, the install worked.
+Verify with `uv tool list` — it should list `ksj-mcp` with a version number.
 
 **To update later:**
-```
+```bash
 uv tool upgrade ksj-mcp
 ```
 
@@ -378,6 +397,8 @@ Three things the server does with these automatically:
   a tag, with or without the `#`. `DOG MAN`, `Dog-Man`, and `DOG-MAN` all
   normalize to the same tag.
 
+---
+
 ## Multiple journals (volumes)
 
 Finished a journal and started a second one? The new book starts over at
@@ -412,10 +433,10 @@ You're re-uploading a page that's already stored. To replace it with the new pho
 > "Upload /path/to/RC-001.jpg with force=True"
 
 **"Server transport closed unexpectedly" / server not starting**
-Run `ksj-mcp --help` in a terminal. If that works, the issue is with the Claude Desktop config — double-check it is valid JSON with `"command": "ksj-mcp"`. If `ksj-mcp` is not found, re-run the install command from Step 3.
+Run `uv tool list` in a terminal — it should list `ksj-mcp` with a version number. If it's missing, re-run the install command from Step 2. If it's installed, the issue is likely the Claude Desktop config — double-check it is valid JSON with `"command": "ksj-mcp"`.
 
 **Server not appearing in tools panel**
-Confirm `ksj-mcp --help` works in a terminal, verify the config file is valid JSON, and restart Claude Desktop after saving any config changes.
+Confirm `uv tool list` shows `ksj-mcp` installed, verify the config file is valid JSON, and restart Claude Desktop after saving any config changes. Once it's connected, ask your assistant to use the `get_version` tool — that confirms the server is actually running and reachable, not just installed.
 
 ---
 
@@ -444,8 +465,7 @@ database is backed up to `captures.db.bak-v3` in the same folder.
 {
   "mcpServers": {
     "ksj": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/ChavezAILabs/ksj-mcp", "ksj-mcp"],
+      "command": "ksj-mcp",
       "env": {
         "KSJ_DATA_DIR": "C:\\Users\\you\\Documents\\ksj-data"
       }
