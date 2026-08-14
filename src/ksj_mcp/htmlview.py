@@ -377,6 +377,21 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 const DATA = JSON.parse(document.getElementById('ksj-data').textContent);
 const ROLE_SECTIONS = __ROLE_SECTIONS__;
 const byId = new Map(DATA.captures.map(c => [c.id, c]));
+// Precomputed once so edgesFor() is O(1) per capture instead of scanning
+// every edge on every call — with hundreds of captures each carrying
+// hundreds of tag-overlap edges, a per-card linear scan turns rendering a
+// wide Timeline window (e.g. jumping to an old capture) into an O(N×E)
+// stall that can freeze the tab for tens of seconds.
+const edgesByCapture = new Map();
+function indexEdge(capId, e) {
+  let list = edgesByCapture.get(capId);
+  if (!list) edgesByCapture.set(capId, list = []);
+  list.push(e);
+}
+for (const e of DATA.edges) {
+  indexEdge(e.source, e);
+  if (e.target !== e.source) indexEdge(e.target, e);
+}
 const prefersReducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let state = { mode: 'timeline', tag: null, entity: null };
 const TIMELINE_PAGE_SIZE = 25;
@@ -430,6 +445,12 @@ function gotoCapture(id) {
   const cap = byId.get(id);
   if (cap && cap.superseded) document.getElementById('fsup').checked = true;
   state.tag = null; state.entity = null;
+  // With every filter just cleared, the unfiltered Timeline renders only
+  // the first timelineLimit captures (newest-first) — widen the window so
+  // the target's card actually exists in the DOM before scrolling to it,
+  // otherwise this silently lands on the default top-N view instead.
+  const idx = DATA.captures.findIndex(c => c.id === id);
+  if (idx >= 0) state.timelineLimit = Math.max(state.timelineLimit, idx + 1);
   setMode('timeline');
   requestAnimationFrame(() => {
     const el = document.getElementById('cap-' + id);
@@ -504,7 +525,7 @@ function edgeDirection(e, capId) {
 }
 function otherEnd(e, capId) { return e.source === capId ? e.target : e.source; }
 function edgesFor(capId) {
-  return DATA.edges.filter(e => e.source === capId || e.target === capId);
+  return edgesByCapture.get(capId) ?? [];
 }
 
 const STRONG_OVERLAP = 2.0;
