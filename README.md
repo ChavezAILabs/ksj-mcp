@@ -179,13 +179,23 @@ uv tool upgrade ksj-mcp
 | **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` |
 | **macOS/Linux** | `~/.config/claude/claude_desktop_config.json` |
 
-Add the following block:
+Claude Desktop launches MCP servers with a limited `PATH`, so a bare
+`"ksj-mcp"` command often won't resolve even though it works fine in a
+terminal — use the full path to the binary `uv tool install` created in
+Step 2 instead:
+
+| Platform | Typical binary path |
+|----------|------|
+| **Windows** | `C:\Users\<you>\.local\bin\ksj-mcp.exe` |
+| **macOS/Linux** | `~/.local/bin/ksj-mcp` (expand `~` to the full path, e.g. `/Users/<you>/.local/bin/ksj-mcp`) |
+
+Add the following block (Windows example shown — swap in your macOS/Linux path if applicable):
 
 ```json
 {
   "mcpServers": {
     "ksj": {
-      "command": "ksj-mcp"
+      "command": "C:\\Users\\<you>\\.local\\bin\\ksj-mcp.exe"
     }
   }
 }
@@ -223,7 +233,7 @@ vs ~95% for Tesseract):
 {
   "mcpServers": {
     "ksj": {
-      "command": "ksj-mcp",
+      "command": "C:\\Users\\<you>\\.local\\bin\\ksj-mcp.exe",
       "env": {
         "KSJ_OCR_BACKEND": "azure",
         "KSJ_AZURE_ENDPOINT": "https://<your-resource>.cognitiveservices.azure.com",
@@ -233,6 +243,8 @@ vs ~95% for Tesseract):
   }
 }
 ```
+
+(Use the `command` path from [Step 3](#step-3--register-the-server) for your platform.)
 
 What this means for your data: each uploaded image is sent to **your own**
 Azure resource (your subscription, your key, Azure's data terms) for text
@@ -437,7 +449,7 @@ You're re-uploading a page that's already stored. To replace it with the new pho
 > "Upload /path/to/RC-001.jpg with force=True"
 
 **"Server transport closed unexpectedly" / server not starting**
-Run `uv tool list` in a terminal — it should list `ksj-mcp` with a version number. If it's missing, re-run the install command from Step 2. If it's installed, the issue is likely the Claude Desktop config — double-check it is valid JSON with `"command": "ksj-mcp"`.
+Run `uv tool list` in a terminal — it should list `ksj-mcp` with a version number. If it's missing, re-run the install command from Step 2. If it's installed, the issue is likely the Claude Desktop config — double-check it is valid JSON and that `command` is the **full path** to the `ksj-mcp` binary (see [Step 3](#step-3--register-the-server)), not just `"ksj-mcp"`.
 
 **Server not appearing in tools panel**
 Confirm `uv tool list` shows `ksj-mcp` installed, verify the config file is valid JSON, and restart Claude Desktop after saving any config changes. Once it's connected, ask your assistant to use the `get_version` tool — that confirms the server is actually running and reachable, not just installed.
@@ -469,7 +481,7 @@ database is backed up to `captures.db.bak-v3` in the same folder.
 {
   "mcpServers": {
     "ksj": {
-      "command": "ksj-mcp",
+      "command": "C:\\Users\\<you>\\.local\\bin\\ksj-mcp.exe",
       "env": {
         "KSJ_DATA_DIR": "C:\\Users\\you\\Documents\\ksj-data"
       }
@@ -477,6 +489,8 @@ database is backed up to `captures.db.bak-v3` in the same folder.
   }
 }
 ```
+
+(Use the `command` path from [Step 3](#step-3--register-the-server) for your platform.)
 
 ---
 
