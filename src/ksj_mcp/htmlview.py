@@ -269,7 +269,8 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
   align-items: center; justify-content: center; text-align: center; padding: 6px;
   overflow: hidden; }
 .bubble:hover { border-color: var(--accent); color: var(--accent); }
-.bubble .bn { font-size: .82rem; overflow-wrap: anywhere; }
+.bubble .bn { font-size: .82rem; overflow-wrap: anywhere; display: -webkit-box;
+  -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .bubble .bc { font-size: .72rem; color: var(--muted); }
 #graph-svg { width: 100%; height: 60vh; min-height: 420px; display: block;
   border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
@@ -803,9 +804,11 @@ function renderGraphLanding(el) {
       <div class="bubbles">` + sec.items.map(i => {
         const size = bubbleSize(i.count, maxCount);
         const valueLit = typeof i.value === 'number' ? i.value : `'${esc(String(i.value))}'`;
+        const labelWidth = Math.round(size * 0.72);
         return `<button class="bubble" style="width:${size}px;height:${size}px"
-          onclick="egoRecenterCluster('${esc(i.role)}', ${valueLit}, '${esc(i.display)}')">
-          <span class="bn">${esc(i.display)}</span><span class="bc">×${i.count}</span></button>`;
+          onclick="egoRecenterCluster('${esc(i.role)}', ${valueLit}, '${esc(i.display)}')"
+          title="${esc(i.display)} (×${i.count})">
+          <span class="bn" style="max-width:${labelWidth}px">${esc(i.display)}</span><span class="bc">×${i.count}</span></button>`;
       }).join('') + '</div></div>';
   }
   el.innerHTML = html;
