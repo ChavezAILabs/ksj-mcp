@@ -2690,13 +2690,9 @@ def dream_correlation(tag: str, window_days: int = 3) -> str:
         lines.append(f"\nNo pairs fell within {window_days} day(s) — the entries exist but don't land near each other in time.")
 
     lines.append(
-        f"\nThese are plain co-occurrence counts — descriptive only, no test of "
-        f"whether the timing is more than chance, and no significance claim of any "
-        f"kind. A base rate this high on either side would make near-simultaneous "
-        f"entries unsurprising regardless of any deeper connection. If you're "
-        f"checking several window_days values in this session, say so when you "
-        f"report the result — that's the exact kind of researcher-degrees-of-freedom "
-        f"search this framing exists to make visible."
+        f"\nDescriptive only — plain co-occurrence counts, not a test of chance, "
+        f"no significance claim. If you check more than one window_days value in "
+        f"this session, say so when you report the result."
     )
     return "\n".join(lines)
 

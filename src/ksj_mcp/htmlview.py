@@ -6,23 +6,21 @@ Overview modes ship in stages, gated only by the data each needs:
   Mode 2 — Index: tags grouped by semantic role, plus the entity register.
   Mode 3 — Connections: every capture card lists its typed, directional
            edges as clickable links (no spatial layout, just adjacency).
-  Mode 4 — Graph: a rotating globe, gated on edge quality and typed edges
-           (server 3.0/3.1) so it never renders a hairball. Each capture
-           sits at a fixed point on a sphere — the most-connected capture
-           dead center of the equator, the rest spiraling outward by
-           connection rank. Dream Capture entries get their own smaller,
-           nested inner sphere; any connection reaching from a dream out to
-           the main sphere renders as a distinct "rod". The globe does one
-           bounded, decaying spin on first activation (never a perpetual
-           animation) and then rests; drag to spin it manually, click a
-           node to inspect it. Personalization controls (globe size, show
-           superseded, journal/AI source, auto-rotate on/off, force
-           labels) plus Reset Layout all live in the graph toolbar — Reset
-           returns every one of these to its default and snaps the view
-           (never the data) back to rotation 0, without replaying the
-           intro spin. A plain-language summary above the graph, including
-           the time span of what's shown, describes what's currently
-           visible and updates live with every control.
+  Mode 4 — Graph: an ego-centric local graph, two layers. Landing view is
+           a cluster/tag overview — captures grouped into bubbles by tag,
+           theme, or entity, bubble size = capture count; this stays
+           legible at any database size because it never renders more than
+           one screen of aggregates. Clicking a bubble (or a capture from
+           Timeline/Index/search) drills into a fixed radial layout: the
+           clicked item sits centered, its direct connections (or, for a
+           cluster, its member captures) arranged evenly around it.
+           Clicking any neighbor recenters the view on it and redraws; a
+           Back button retraces the history stack, bottoming out at the
+           landing view. High-degree nodes are capped (a "+N more" node
+           expands the ring on click) rather than degrading into overlap.
+           No physics simulation and no rotation — this replaced an
+           earlier rotating-globe design that rendered the whole dataset
+           at once.
 
 One .html file, all data inlined as JSON, vanilla JS/CSS, no network access,
 no build step, opens in any browser. Everything user-authored is escaped
@@ -177,7 +175,6 @@ header .meta { color: var(--muted); font-size: .82rem; margin-top: 4px; }
   font-size: .88rem; }
 .toolbar input[type=search] { flex: 1 1 200px; }
 .toolbar label { font-size: .82rem; color: var(--muted); display: flex; gap: 6px; align-items: center; }
-.toolbar input[type=range] { width: 110px; accent-color: var(--accent); }
 .btn { border: 1px solid var(--line); background: var(--card); color: var(--ink);
   padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: .85rem; }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
@@ -201,6 +198,8 @@ header .meta { color: var(--muted); font-size: .82rem; margin-top: 4px; }
 .chip { font-size: .78rem; background: var(--chip); border-radius: 999px;
   padding: 2px 10px; cursor: pointer; border: none; color: var(--ink); }
 .chip:hover { background: var(--accent-soft); color: var(--accent); }
+.chip-graph { background: none; border: 1px solid var(--line); color: var(--muted); }
+.chip-graph:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
 details { margin-top: 10px; }
 details summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
 .fields { margin-top: 8px; }
@@ -212,12 +211,19 @@ details summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
 .idx-section h2 { font-size: 1rem; margin-bottom: 8px; }
 .idx-section h2 small { color: var(--muted); font-weight: 400; }
 .idx-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.idx-item { border: 1px solid var(--line); background: var(--card); border-radius: 8px;
-  padding: 6px 12px; cursor: pointer; font-size: .86rem; color: var(--ink); }
-.idx-item:hover { border-color: var(--accent); color: var(--accent); }
+.idx-item { display: inline-flex; align-items: center; border: 1px solid var(--line);
+  background: var(--card); border-radius: 8px; overflow: hidden; font-size: .86rem; }
+.idx-item:hover { border-color: var(--accent); }
+.idx-main { border: none; background: none; color: var(--ink); padding: 6px 10px;
+  cursor: pointer; font-size: inherit; }
+.idx-main:hover { color: var(--accent); }
+.idx-graph { border: none; border-left: 1px solid var(--line); background: none;
+  color: var(--muted); padding: 6px 9px; cursor: pointer; font-size: .8rem; }
+.idx-graph:hover { color: var(--accent); background: var(--accent-soft); }
 .idx-item .n { color: var(--muted); font-size: .76rem; margin-left: 6px; }
 .idx-item .kind { color: var(--muted); font-size: .74rem; margin-left: 6px; font-style: italic; }
 .empty { color: var(--muted); font-style: italic; padding: 24px 0; }
+.load-more { text-align: center; padding: 10px 0 24px; }
 footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 
 /* mode 3 — connections */
@@ -245,85 +251,53 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 
 /* mode 4 — graph */
 .legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-  font-size: .76rem; color: var(--muted); margin-left: auto; }
-.legend .sep { color: var(--line); }
+  font-size: .76rem; color: var(--muted); margin: 10px 0 0; }
 .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
   margin-right: 4px; vertical-align: middle; }
-.legend .line { display: inline-block; width: 16px; height: 2px; margin-right: 4px;
-  vertical-align: middle; background: var(--muted); }
 .dot.t-RC { background: var(--type-rc); }
 .dot.t-SYN { background: var(--type-syn); }
 .dot.t-REV { background: var(--type-rev); }
 .dot.t-DC { background: var(--type-dc); }
 .dot.t-AIEX { background: var(--accent); }
-.line.e-reference { background: var(--accent); }
-.line.e-asserted { background: var(--edge-negative); }
-.line.e-entity_overlap { background: var(--accent); opacity: .5; }
-.line.e-tag_overlap { background: var(--muted); opacity: .5; }
-.line.e-rod { background: var(--type-dc); }
 #view-graph { position: relative; }
-#graph-svg { width: 100%; height: 64vh; min-height: 360px; display: block;
-  border: 1px solid var(--line); border-radius: 12px; background: var(--card); touch-action: none;
-  cursor: grab; }
-#graph-svg:active { cursor: grabbing; }
-/* While an actual drag is in progress, force grabbing everywhere — without
-   this, passing over a node mid-drag would flicker the cursor to pointer
-   (its own rule) even though the user is mid-gesture, not about to click. */
-#graph-svg.dragging, #graph-svg.dragging * { cursor: grabbing !important; }
-.globe-outline { fill: none; stroke: var(--line); stroke-width: 1; opacity: .6; }
-.globe-equator { stroke: var(--accent); stroke-width: 1; opacity: .28; stroke-dasharray: 2 4; }
-.dc-globe-outline { fill: none; stroke: var(--type-dc); stroke-width: 1; opacity: .5; stroke-dasharray: 3 3; }
-.arrowhead { fill: var(--muted); }
-/* cursor lives on the whole node group, not just the circle, so hovering
-   any part of a node (including its label) reliably shows pointer instead
-   of occasionally falling through to the background's grab cursor. */
-.node { cursor: pointer; }
-.node circle.body { stroke: var(--card); stroke-width: 1.5; }
-.node.t-RC circle.body { fill: var(--type-rc); }
-.node.t-SYN circle.body { fill: var(--type-syn); }
-.node.t-REV circle.body { fill: var(--type-rev); }
-.node.t-DC circle.body { fill: var(--type-dc); }
-.node.t-AIEX circle.body { fill: var(--accent); }
-.node.superseded circle.body { opacity: .5; stroke-dasharray: 2 2; }
-.node.src-ai circle.body { stroke: var(--accent); stroke-width: 2; }
-.node .node-label { font-size: 9px; fill: var(--ink); pointer-events: none; user-select: none; }
-/* !important: nodes/edges get a per-frame inline opacity from the globe's
-   depth cue (renderGraphPositions), which — being an inline style — would
-   otherwise always beat a plain class rule in the cascade and silently
-   mask the ego-highlight dimming on every animation frame. */
-.node.dimmed { opacity: .15 !important; }
-.node:hover circle.body { stroke: var(--ink); stroke-width: 2.5; }
-.edge { fill: none; stroke: var(--muted); stroke-opacity: .3; stroke-width: 1; }
-.edge.e-reference { stroke: var(--accent); stroke-opacity: .8; stroke-width: 1.6; }
-.edge.e-asserted { stroke-width: 2; stroke: var(--muted); }
-.edge.e-asserted.e-rel-supersedes { stroke: var(--edge-negative); stroke-dasharray: 6 3; }
-.edge.e-asserted.e-rel-refutes { stroke: var(--edge-negative); stroke-dasharray: 2 3; stroke-width: 1.4; }
-.edge.e-asserted.e-rel-supports { stroke: var(--edge-positive); }
-.edge.e-asserted.e-rel-narrows { stroke: var(--muted); }
-.edge.e-entity_overlap { stroke: var(--accent); stroke-opacity: .45; stroke-width: 1.3; }
-.edge.e-tag_overlap { stroke: var(--muted); stroke-opacity: .3; stroke-width: 1; }
-/* A rod (a connection crossing from the inner DC/dream sphere out to the
-   main sphere) always gets the same solid strut look, regardless of the
-   underlying tag/reference/relation type it's also styled as — !important
-   because a same-specificity type/relation combo (e.g. .e-asserted.e-rel-
-   supports) would otherwise win on source order or out-specificity a plain
-   two-class .edge.e-rod rule. */
-.edge.e-rod { stroke: var(--type-dc) !important; stroke-width: 1.8 !important;
-  stroke-opacity: .55 !important; stroke-dasharray: none !important; }
-.edge.dimmed { stroke-opacity: .08 !important; }
-.graph-caption { color: var(--muted); font-size: .8rem; line-height: 1.5; margin-bottom: 8px; }
+.graph-caption { color: var(--muted); font-size: .8rem; line-height: 1.5; margin-bottom: 10px; }
 .graph-caption strong { color: var(--ink); }
-.graph-summary { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
-  padding: 10px 14px; margin-bottom: 10px; font-size: .86rem; color: var(--ink); line-height: 1.6; }
-.graph-tooltip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
-  font-size: .76rem; padding: 4px 8px; border-radius: 6px; transform: translate(-50%, -130%);
-  white-space: nowrap; z-index: 5; }
-.graph-panel { position: absolute; top: 12px; right: 12px; max-width: 260px; background: var(--card);
-  border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
-  box-shadow: 0 4px 18px rgba(0,0,0,.16); font-size: .85rem; z-index: 6; }
-.graph-panel h3 { font-size: .92rem; margin-bottom: 4px; }
-.graph-panel .meta2 { color: var(--muted); font-size: .76rem; margin-bottom: 6px; }
-.graph-panel button { margin-top: 8px; width: 100%; }
+.graph-back { margin-bottom: 10px; }
+.bubbles { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.bubble { border: 1px solid var(--line); background: var(--card); border-radius: 999px;
+  cursor: pointer; color: var(--ink); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; padding: 6px;
+  overflow: hidden; }
+.bubble:hover { border-color: var(--accent); color: var(--accent); }
+.bubble .bn { font-size: .82rem; overflow-wrap: anywhere; }
+.bubble .bc { font-size: .72rem; color: var(--muted); }
+#graph-svg { width: 100%; height: 60vh; min-height: 420px; display: block;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.arrowhead { fill: var(--muted); }
+.ego-node { cursor: pointer; }
+.ego-node circle.body { stroke: var(--card); stroke-width: 1.5; }
+.ego-node.t-RC circle.body { fill: var(--type-rc); }
+.ego-node.t-SYN circle.body { fill: var(--type-syn); }
+.ego-node.t-REV circle.body { fill: var(--type-rev); }
+.ego-node.t-DC circle.body { fill: var(--type-dc); }
+.ego-node.t-AIEX circle.body { fill: var(--accent); }
+.ego-node.cluster circle.body { fill: var(--accent); }
+.ego-node.more { cursor: pointer; }
+.ego-node.more circle.body { fill: var(--chip); stroke: var(--muted); }
+.ego-node.superseded circle.body { opacity: .5; stroke-dasharray: 2 2; }
+.ego-node.src-ai circle.body { stroke: var(--accent); stroke-width: 2; }
+.ego-node:hover circle.body { stroke: var(--ink); stroke-width: 2.5; }
+.ego-label { font-size: 10px; color: var(--ink); text-align: center; line-height: 1.25;
+  overflow: hidden; overflow-wrap: anywhere; pointer-events: none; font-family: inherit; }
+.ego-edge { stroke: var(--muted); stroke-opacity: .5; stroke-width: 1.4; fill: none; }
+.ego-edge.e-reference { stroke: var(--accent); stroke-opacity: .85; stroke-width: 1.8; }
+.ego-edge.e-asserted { stroke-width: 2; }
+.ego-edge.e-asserted.e-rel-supersedes { stroke: var(--edge-negative); stroke-dasharray: 6 3; }
+.ego-edge.e-asserted.e-rel-refutes { stroke: var(--edge-negative); stroke-dasharray: 2 3; }
+.ego-edge.e-asserted.e-rel-supports { stroke: var(--edge-positive); }
+.ego-edge.e-entity_overlap { stroke: var(--accent); stroke-opacity: .5; }
+.ego-edge.e-tag_overlap { stroke: var(--muted); stroke-opacity: .4; }
+.ego-panel { text-align: center; margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -352,38 +326,12 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
     <label>to <input type="date" id="fdateto" onchange="render()"></label>
   </div>
   <div class="toolbar" id="graph-toolbar" style="display:none">
-    <label>min tag-overlap strength
-      <input type="range" id="gminstrength" min="0" max="7" step="0.5" value="3.5"
-        oninput="onGraphStrengthChange()">
-      <span id="gminstrength-val">3.5</span>
-    </label>
-    <label>globe size
-      <input type="range" id="gsize" min="80" max="260" step="10" value="200"
-        oninput="onGlobeSizeChange()">
-      <span id="gsize-val">200</span>
-    </label>
-    <label><input type="checkbox" id="gshowsup" onchange="onGraphSupersededToggle()"> show superseded</label>
-    <select id="gsource" onchange="onGraphSourceChange()">
+    <label><input type="checkbox" id="gshowsup" onchange="onGraphFilterChange()"> show superseded</label>
+    <select id="gsource" onchange="onGraphFilterChange()">
       <option value="">Journal + AI</option>
       <option value="journal">Journal only</option>
       <option value="ai_extract">AI-extracted only</option>
     </select>
-    <label><input type="checkbox" id="gautorotate" checked onchange="onGraphAutoRotateToggle()"> auto-rotate</label>
-    <label><input type="checkbox" id="gforcelabels" onchange="onGraphLabelsToggle()"> always show labels</label>
-    <button class="btn" onclick="resetGraphLayout()">Reset layout</button>
-    <div class="legend">
-      <span><i class="dot t-RC"></i>RC</span>
-      <span><i class="dot t-SYN"></i>SYN</span>
-      <span><i class="dot t-REV"></i>REV</span>
-      <span><i class="dot t-DC"></i>DC</span>
-      <span><i class="dot t-AIEX"></i>AIEX</span>
-      <span class="sep">|</span>
-      <span><i class="line e-reference"></i>reference</span>
-      <span><i class="line e-asserted"></i>asserted</span>
-      <span><i class="line e-entity_overlap"></i>entity</span>
-      <span><i class="line e-tag_overlap"></i>tag overlap</span>
-      <span><i class="line e-rod"></i>dream connection (rod)</span>
-    </div>
   </div>
   <div class="activetag" id="activetag"></div>
   <main>
@@ -391,28 +339,34 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
     <div id="view-index" style="display:none"></div>
     <div id="view-graph" style="display:none">
       <div class="graph-caption">
-        <strong>How to read this:</strong> position shows how connected a capture is —
-        the most-connected capture sits front-and-center on the equator; everyone else
-        spirals outward from there. Bigger nodes also mean more connections. Drag
-        anywhere to spin the globe, click a node for details.
+        <strong>How to read this:</strong> start with the cluster overview below — bubble
+        size is how many captures share that tag. Click a bubble, or "view in graph" on any
+        capture, to open its local connections: the clicked item sits centered, its direct
+        connections (or a cluster's member captures) arranged around it. Click any neighbor
+        to recenter. Use Back to retrace your steps.
       </div>
-      <div id="graph-summary" class="graph-summary"></div>
-      <svg id="graph-svg" viewBox="0 0 900 560" preserveAspectRatio="xMidYMid meet"
-        aria-label="Connection graph">
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
-            markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M0,0 L10,5 L0,10 z" class="arrowhead"></path>
-          </marker>
-        </defs>
-        <circle id="globe-outline" class="globe-outline" cx="450" cy="280" r="200"></circle>
-        <line id="globe-equator" class="globe-equator" x1="250" y1="280" x2="650" y2="280"></line>
-        <circle id="dc-globe-outline" class="dc-globe-outline" cx="450" cy="280" r="70"></circle>
-        <g id="graph-edges"></g>
-        <g id="graph-nodes"></g>
-      </svg>
-      <div id="graph-tooltip" class="graph-tooltip" hidden></div>
-      <div id="graph-panel" class="graph-panel" hidden></div>
+      <div id="graph-back" class="graph-back" style="display:none">
+        <button class="btn" onclick="graphGoBack()">← Back</button>
+      </div>
+      <div id="graph-landing"></div>
+      <div id="graph-ego" style="display:none">
+        <div id="ego-empty" class="empty" style="display:none"></div>
+        <svg id="graph-svg" viewBox="0 0 900 560" preserveAspectRatio="xMidYMid meet"
+          aria-label="Connection graph">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" class="arrowhead"></path>
+            </marker>
+          </defs>
+          <g id="graph-edges"></g>
+          <g id="graph-nodes"></g>
+        </svg>
+        <div class="ego-panel">
+          <button class="btn" id="ego-open-timeline">Open in Timeline →</button>
+        </div>
+        <div id="graph-legend" class="legend"></div>
+      </div>
     </div>
   </main>
   <footer>Generated by ksj-mcp · local file, no network · data as of <span id="gen"></span></footer>
@@ -424,6 +378,13 @@ const ROLE_SECTIONS = __ROLE_SECTIONS__;
 const byId = new Map(DATA.captures.map(c => [c.id, c]));
 const prefersReducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let state = { mode: 'timeline', tag: null, entity: null };
+const TIMELINE_PAGE_SIZE = 25;
+state.timelineLimit = TIMELINE_PAGE_SIZE;
+let graphView = { center: null };  // null = landing (cluster/tag overview)
+let graphHistory = [];             // stack of prior centers (null | {type,...})
+let egoShowCount = 0;               // how many neighbors/members to render (reset per center)
+let graphShowSuperseded = false;
+let graphSourceFilter = '';
 
 const esc = s => String(s).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -441,20 +402,6 @@ function setMode(m) {
   document.getElementById('view-graph').style.display = m === 'graph' ? '' : 'none';
   if (m !== 'timeline') document.getElementById('activetag').style.display = 'none';
   render();
-  if (m === 'graph') {
-    // ensureGraphInit() only ever runs its body once (first activation) and
-    // stages its own delayed spin-start. A RETURN visit later resumes the
-    // rotation loop ONLY if a spin was genuinely still in flight when the
-    // user left (spinVelocity above the stop threshold) — a settled,
-    // static globe should stay exactly as still as it was, not restart
-    // spinning just because the tab was revisited.
-    const wasInitialized = graphInitialized;
-    ensureGraphInit();
-    if (wasInitialized && !globeLoopRunning && Math.abs(spinVelocity) > SPIN_STOP_THRESHOLD) {
-      globeLoopRunning = true;
-      requestAnimationFrame(stepGlobe);
-    }
-  }
 }
 
 function setTag(value, roleName) {
@@ -491,6 +438,35 @@ function gotoCapture(id) {
       setTimeout(() => el.classList.remove('flash'), 1200);
     }
   });
+}
+
+// Deep-link entry points into the graph tab (from a capture card, or an
+// Index tag/entity chip) — both start a fresh navigation, so any prior
+// drill-in history is discarded rather than appended to.
+function gotoGraph(id) {
+  graphHistory = [];
+  egoShowCount = EGO_NEIGHBOR_CAP;
+  graphView = { center: { type: 'capture', id } };
+  setMode('graph');
+}
+function gotoGraphCluster(role, value, display) {
+  graphHistory = [];
+  egoShowCount = EGO_NEIGHBOR_CAP;
+  graphView = { center: { type: 'cluster', role, value, display } };
+  setMode('graph');
+}
+
+// True once any search/filter control is off its default — at that point the
+// timeline shows its full (unpaginated) match set rather than the recent-N
+// window, since a filtered result set is already bounded by the filter itself.
+function hasActiveFilters() {
+  return !!document.getElementById('q').value.trim()
+    || !!document.getElementById('ftype').value
+    || !!document.getElementById('fvol').value
+    || !!document.getElementById('fsrc').value
+    || !!document.getElementById('fdatefrom').value
+    || !!document.getElementById('fdateto').value
+    || !!state.tag || !!state.entity;
 }
 
 function filtered() {
@@ -607,7 +583,9 @@ function captureCard(c) {
     <div class="top"><span class="tid">${esc(label(c))}</span>${badges}
       <span class="date">${esc(c.date)}</span></div>
     <div class="summary">${esc(c.summary) || '<i>(no summary)</i>'}</div>
-    <div class="chips">${chips}</div>
+    <div class="chips">${chips}
+      <button class="chip chip-graph" onclick="gotoGraph(${c.id})" title="View connections graph">view in graph →</button>
+    </div>
     <div class="connections">
       <h4>Connections</h4>
       ${connectionsSectionHtml(c.id)}
@@ -617,6 +595,11 @@ function captureCard(c) {
       <div class="rawtext">${esc(c.text) || '(empty)'}</div>
     </details>
   </article>`;
+}
+
+function loadMoreTimeline() {
+  state.timelineLimit += TIMELINE_PAGE_SIZE;
+  render();
 }
 
 function renderTimeline(el) {
@@ -632,9 +615,25 @@ function renderTimeline(el) {
     at.innerHTML = `<span>filtered to entity: ${esc(state.entity.name)} (${esc(state.entity.kind)})</span>
       <button onclick="clearTag()">clear</button>`;
   } else { at.style.display = 'none'; }
-  el.innerHTML = caps.length
-    ? caps.map(captureCard).join('')
-    : '<div class="empty">No captures match the current filters.</div>';
+
+  // Unfiltered browsing shows only the most recent N (captures already
+  // arrive newest-first); any active search/filter shows its full match set
+  // unpaginated, since that set is already bounded by the filter itself.
+  const windowed = hasActiveFilters();
+  const shown = windowed ? caps : caps.slice(0, state.timelineLimit);
+  const remaining = windowed ? 0 : caps.length - shown.length;
+
+  if (!caps.length) {
+    el.innerHTML = '<div class="empty">No captures match the current filters.</div>';
+    return;
+  }
+  let html = shown.map(captureCard).join('');
+  if (remaining > 0) {
+    html += `<div class="load-more">
+      <button class="btn" onclick="loadMoreTimeline()">Load ${Math.min(remaining, TIMELINE_PAGE_SIZE)} more (${remaining} remaining)</button>
+    </div>`;
+  }
+  el.innerHTML = html;
 }
 
 function renderIndex(el) {
@@ -643,9 +642,13 @@ function renderIndex(el) {
   if (ents.length) {
     html += `<div class="idx-section"><h2>Entities <small>· people, places, works, symbols</small></h2>
       <div class="idx-list">` + ents.map(e =>
-        `<button class="idx-item" onclick="setEntity(${e.id})">
-          ${esc(e.name)}<span class="kind">${esc(e.kind)}</span>
-          <span class="n">×${e.capture_ids.length}</span></button>`).join('') +
+        `<span class="idx-item">
+          <button class="idx-main" onclick="setEntity(${e.id})">
+            ${esc(e.name)}<span class="kind">${esc(e.kind)}</span>
+            <span class="n">×${e.capture_ids.length}</span></button>
+          <button class="idx-graph" onclick="gotoGraphCluster('entity', ${e.id}, '${esc(e.name)}')"
+            title="View in graph">⟡</button>
+        </span>`).join('') +
       '</div></div>';
   }
   for (const [role, title] of ROLE_SECTIONS) {
@@ -661,8 +664,12 @@ function renderIndex(el) {
     if (!items.length) continue;
     html += `<div class="idx-section"><h2>${esc(title)} <small>· ${items.length}</small></h2>
       <div class="idx-list">` + items.map(([v, d]) =>
-        `<button class="idx-item" onclick="setTag('${esc(v)}', '${esc(role)}')">
-          ${esc(d.display)}<span class="n">×${d.n}</span></button>`).join('') +
+        `<span class="idx-item">
+          <button class="idx-main" onclick="setTag('${esc(v)}', '${esc(role)}')">
+            ${esc(d.display)}<span class="n">×${d.n}</span></button>
+          <button class="idx-graph" onclick="gotoGraphCluster('${esc(role)}', '${esc(v)}', '${esc(d.display)}')"
+            title="View in graph">⟡</button>
+        </span>`).join('') +
       '</div></div>';
   }
   el.innerHTML = html || '<div class="empty">Nothing indexed yet — upload some captures.</div>';
@@ -671,68 +678,33 @@ function renderIndex(el) {
 function render() {
   if (state.mode === 'timeline') renderTimeline(document.getElementById('view-timeline'));
   else if (state.mode === 'index') renderIndex(document.getElementById('view-index'));
-  // graph mode keeps its own persistent DOM (see ensureGraphInit) — no
-  // innerHTML replacement here, that would blow away node positions.
+  else if (state.mode === 'graph') renderGraphView();
 }
 
-// ---- mode 4: rotating globe, with a nested inner globe for dreams ----
+// ---- mode 4: ego-centric graph, two layers ----
 //
-// A small hand-written spherical projection (no CDN dependency — "opens in
-// any browser, no network" rules that out). Each capture sits at a FIXED
-// point on a sphere — the most-connected capture is placed dead center of
-// the equator, the rest spiral outward from there by connection rank.
-// Dream Capture (DC) entries get their OWN smaller, concentric inner
-// sphere — dreams are a distinct, more personal category — and any
-// connection reaching from a DC capture out to the main sphere renders as
-// a visually distinct "rod" strut between the two nested globes.
+// Landing view: tag/role/entity cluster bubbles (reuses the same counting
+// logic as renderIndex), sized by capture count. Drill-in view: a single
+// fixed radial layout — the clicked capture or cluster sits centered,
+// direct connections (or, for a cluster, member captures) arranged evenly
+// around it. Clicking a neighbor recenters; Back retraces graphHistory.
+// No physics, no rotation — every render is a plain, static SVG built from
+// the already-embedded DATA.edges/DATA.captures (this is a static export,
+// there's no live DB to query further).
 //
-// The globe does one bounded, decaying spin (like a coin settling, not a
-// perpetual motion machine) on first activation, then comes to rest.
-// Reset Layout, the strength slider, and every personalization toggle
-// below all explicitly halt any spin in progress rather than letting one
-// keep running underneath a control the user just touched.
-//
-// Weak tag-overlap edges are excluded by default (adjustable via the
-// strength slider), matching the server's own traversal rule
-// (connections.py _edge_map) — a graph where every capture connects to
-// hundreds of others is a hairball, not a graph.
-
-function filterGraphEdges(edges, minStrength) {
-  return edges.filter(e => e.type !== 'tag_overlap' || e.strength >= minStrength);
-}
-
-function computeDegrees(nodeIds, edges) {
-  const deg = new Map(nodeIds.map(id => [id, 0]));
-  for (const e of edges) {
-    deg.set(e.source, (deg.get(e.source) || 0) + 1);
-    deg.set(e.target, (deg.get(e.target) || 0) + 1);
-  }
-  return deg;
-}
+// No fixed strength floor on tag-overlap edges: real KSJ data shows
+// per-capture connection strength varies enormously (checked against the
+// live 900+ capture corpus — many individual captures' strongest edge
+// falls well under any single global cutoff that would exclude noise for
+// OTHER captures), so a fixed threshold silently emptied the ring for
+// plenty of real captures. Ranking by strength and capping at
+// EGO_NEIGHBOR_CAP already does the noise-control job per node, which a
+// blanket floor can't.
 
 const GRAPH_W = 900, GRAPH_H = 560, GRAPH_CX = GRAPH_W / 2, GRAPH_CY = GRAPH_H / 2;
-const GLOBE_SIZE_DEFAULT = 200, GLOBE_SIZE_MIN = 80, GLOBE_SIZE_MAX = 260;
-const DC_GLOBE_RATIO = 0.35; // inner sphere radius, as a fraction of the outer one
-const GRAPH_DEFAULT_STRENGTH = 3.5;
-const SPIN_INITIAL_VELOCITY = 0.05; // radians/frame at the start of the reveal spin
-const SPIN_DECAY = 0.985;           // multiplicative decay per frame — a graceful slow-down
-const SPIN_STOP_THRESHOLD = 0.00005;
-
-let graphInitialized = false;
-let graphNodes = [], graphSimLinks = [];
-let graphSelected = null;
-let currentMinStrength = GRAPH_DEFAULT_STRENGTH;
-let globePositions = new Map();   // outer-sphere capture id -> {lat, lon}
-let dcGlobePositions = new Map(); // inner-sphere (DC) capture id -> {lat, lon}
-let globeRotation = 0;
-let globeRadius = GLOBE_SIZE_DEFAULT;
-let globeLoopRunning = false;
-let spinVelocity = 0;
-let dragActive = false, dragStartX = 0, dragMoved = false, dragStartRotation = 0, dragNodeHit = null;
-let graphShowSuperseded = false;
-let graphSourceFilter = '';
-let graphAutoRotate = true;
-let graphForceLabels = false;
+const EGO_RING_R = 200, EGO_CENTER_R = 44, EGO_NEIGHBOR_R = 30;
+const EGO_NEIGHBOR_CAP = 8;
+const TYPE_LABELS = { RC: 'Rapid Capture', SYN: 'Synthesis', REV: 'Review', DC: 'Dream Capture', AIEX: 'AI-Extracted' };
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -740,71 +712,7 @@ function svgEl(tag, attrs) {
   return el;
 }
 
-function dcRadius() { return globeRadius * DC_GLOBE_RATIO; }
-function labelsVisible() { return graphForceLabels || graphNodes.length <= 40; }
-
-// Deterministic sphere placement, ranked by connection count — NOT random.
-// The single most-connected capture in the given set sits at (lat=0,
-// lon=0): dead center of the equator, front-and-center at rotation=0. The
-// rest spiral outward by rank: remaining nodes alternate north/south
-// hemispheres with latitude magnitude growing with rank (so "distance from
-// the equator" visually encodes "how connected"), longitude spreads via
-// the golden angle for even coverage as the globe turns. Called once for
-// the outer (non-DC) captures and once for the DC captures — each sphere
-// gets its own independent equator-center. Both hubs sit at lat=0, and at
-// lat=0 the projection's x/z terms are radius*sin(lon)/radius*cos(lon) —
-// the radius factors out, so two hubs at the SAME (lat=0, lon=0) project
-// to the exact same screen pixel regardless of how different their sphere
-// radii are. `lonOffset` (a quarter turn for the DC sphere, see the
-// buildGraphData call site) keeps both hubs on the equator while pulling
-// them apart in screen space. Computed once per sphere and
-// cached — the strength slider changes which EDGES are visible, never
-// where a capture physically sits, so each sphere's shape stays a stable
-// reference frame across every interaction, matching Reset Layout's
-// "resets the view, not the data" principle.
-function computeGlobePositions(captures, degreeMap, lonOffset = 0) {
-  const ranked = [...captures].sort((a, b) => (degreeMap.get(b.id) || 0) - (degreeMap.get(a.id) || 0));
-  const n = ranked.length;
-  const positions = new Map();
-  if (!n) return positions;
-  positions.set(ranked[0].id, { lat: 0, lon: lonOffset }); // most-connected: exact equator center
-  if (n === 1) return positions;
-
-  const golden = Math.PI * (3 - Math.sqrt(5));
-  const m = n - 1; // remaining captures to spiral outward from the equator
-  ranked.slice(1).forEach((c, idx) => {
-    const rank = idx + 1; // 1..m
-    const hemisphere = rank % 2 === 1 ? 1 : -1;
-    // A SMOOTH (not discretized) progression from just-off-equator to
-    // near-pole as rank increases: t = rank/m grows continuously, so every
-    // rank gets a distinct latitude magnitude. The earlier version used
-    // Math.ceil(rank/2), which groups PAIRS of ranks onto the exact same
-    // latitude band (differing only by hemisphere) — a coarse
-    // approximation that visibly clustered nodes together at some viewing
-    // angles. The golden-angle longitude spiral is unchanged.
-    const t = rank / m;
-    const lat = hemisphere * t * (Math.PI / 2) * 0.94;
-    const lon = lonOffset + golden * rank;
-    positions.set(c.id, { lat, lon });
-  });
-  return positions;
-}
-
-// Orthographic sphere -> 2D projection at an arbitrary radius (the outer
-// main sphere and the inner DC sphere share the same center and rotation,
-// differing only in radius). depth is 0 (far side) .. 1 (near side); used
-// to scale/dim/reorder elements for the 3D illusion.
-function projectOnSphere(pos, rotation, radius) {
-  const lon = pos.lon + rotation;
-  const cosLat = Math.cos(pos.lat);
-  const x3d = radius * cosLat * Math.sin(lon);
-  const y3d = radius * Math.sin(pos.lat);
-  const z3d = radius * cosLat * Math.cos(lon);
-  return { x: GRAPH_CX + x3d, y: GRAPH_CY - y3d, depth: (z3d / radius + 1) / 2 };
-}
-
-// Personalization: which captures are currently eligible to appear at all
-// (independent of the strength slider, which only ever filters EDGES).
+// Personalization: which captures are currently eligible to appear at all.
 function graphVisibleCaptures() {
   return DATA.captures.filter(c =>
     (graphShowSuperseded || !c.superseded) &&
@@ -812,486 +720,258 @@ function graphVisibleCaptures() {
   );
 }
 
-function buildGraphData(minStrength) {
-  currentMinStrength = minStrength;
-  const visible = graphVisibleCaptures();
-  const filteredEdges = filterGraphEdges(DATA.edges, minStrength);
-  const degrees = computeDegrees(visible.map(c => c.id), filteredEdges);
-
-  const outerCaptures = visible.filter(c => c.type !== 'DC');
-  const dcCaptures = visible.filter(c => c.type === 'DC');
-  const fullDegrees = computeDegrees(visible.map(c => c.id), DATA.edges);
-  if (globePositions.size === 0 && outerCaptures.length) {
-    globePositions = computeGlobePositions(outerCaptures, fullDegrees);
-  }
-  if (dcGlobePositions.size === 0 && dcCaptures.length) {
-    // Quarter-turn offset so the DC sphere's rank-0 (most-connected) node
-    // is not pinned to the SAME screen pixel as the outer sphere's at
-    // rotation=0 (the state Reset Layout freezes on) — both stay exactly
-    // on their own equator, just not aligned to the same longitude. This
-    // does NOT guarantee separation at every rotation angle: two equator
-    // points sharing one rotation variable but different radii are
-    // same-frequency sinusoids in screen-x, so their difference still
-    // has a zero every ~half turn for any constant offset. See the BUG-1
-    // note on computeGlobePositions and BUGS_htmlview_graph_2026-08-03.md.
-    dcGlobePositions = computeGlobePositions(dcCaptures, fullDegrees, Math.PI / 2);
-  }
-
-  graphNodes = visible.map(c => {
-    const deg = degrees.get(c.id) || 0;
-    const r = Math.max(5, Math.min(16, 5 + deg * 1.3));
-    const isDC = c.type === 'DC';
-    const pos = (isDC ? dcGlobePositions : globePositions).get(c.id);
-    if (!pos) return null; // defensive — shouldn't happen
-    return { id: c.id, lat: pos.lat, lon: pos.lon, r, deg, cap: c, isDC };
-  }).filter(Boolean);
-
-  const nodeById = new Map(graphNodes.map(n => [n.id, n]));
-  graphSimLinks = filteredEdges
-    .map(e => ({ ...e, _s: nodeById.get(e.source), _t: nodeById.get(e.target) }))
-    .filter(l => l._s && l._t);
-}
-
-// ---- graph summary text: a plain-language description of what's on
-// screen right now, recomputed whenever the strength threshold changes ----
-
-function computeComponents(nodeIds, edges) {
-  const parent = new Map(nodeIds.map(id => [id, id]));
-  function find(x) {
-    while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
-    return x;
-  }
-  function union(a, b) { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); }
-  for (const e of edges) union(e.source, e.target);
-  const groups = new Map();
-  for (const id of nodeIds) {
-    const root = find(id);
-    if (!groups.has(root)) groups.set(root, []);
-    groups.get(root).push(id);
-  }
-  return [...groups.values()];
-}
-
-function summarizeGraph(nodes, links) {
-  const counts = { reference: 0, entity_overlap: 0, tag_overlap: 0,
-    supersedes: 0, refutes: 0, narrows: 0, supports: 0, distills: 0, assesses: 0, observes: 0 };
-  for (const l of links) {
-    if (l.type === 'asserted') counts[l.relation] = (counts[l.relation] || 0) + 1;
-    else counts[l.type] = (counts[l.type] || 0) + 1;
-  }
-  const degreeMap = computeDegrees(nodes.map(n => n.id), links);
-  const isolated = nodes.filter(n => (degreeMap.get(n.id) || 0) === 0);
-  const components = computeComponents(nodes.map(n => n.id), links);
-  const largest = components.reduce((a, b) => (b.length > a.length ? b : a), []);
-  const topNode = nodes.reduce(
-    (best, n) => (degreeMap.get(n.id) || 0) > (best ? (degreeMap.get(best.id) || 0) : -1) ? n : best,
-    null
-  );
-  return { counts, isolated, components, largest, topNode, degreeMap };
-}
-
-function graphSummaryHtml() {
-  const nodes = graphNodes, links = graphSimLinks;
-  const total = nodes.length;
-  if (!total) return 'No captures to show.';
-  const s = summarizeGraph(nodes, links);
-  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-
-  const dates = nodes.map(n => n.cap.date).filter(Boolean).sort();
-  const timeSpan = dates.length
-    ? (dates[0] === dates[dates.length - 1]
-        ? `All from ${dates[0]}.`
-        : `Captures span ${dates[0]} to ${dates[dates.length - 1]}.`)
-    : '';
-
-  const sentences = [
-    `${plural(total, 'capture')}, ${plural(links.length, 'connection')} shown at strength ≥ ${currentMinStrength.toFixed(1)}.`,
-  ];
-  if (timeSpan) sentences.push(timeSpan);
-
-  const typeBits = [];
-  if (s.counts.reference) typeBits.push(plural(s.counts.reference, 'reference'));
-  if (s.counts.entity_overlap) typeBits.push(plural(s.counts.entity_overlap, 'entity overlap'));
-  if (s.counts.tag_overlap) typeBits.push(plural(s.counts.tag_overlap, 'tag overlap'));
-  const relBits = ['supersedes', 'refutes', 'narrows', 'supports', 'distills', 'assesses', 'observes']
-    .filter(r => s.counts[r]).map(r => `${s.counts[r]} ${r}`);
-  if (relBits.length) typeBits.push(`asserted (${relBits.join(', ')})`);
-  if (typeBits.length) sentences.push(typeBits.join(' · ') + '.');
-
-  if (links.length) {
-    sentences.push(s.components.length > 1
-      ? `Forms ${s.components.length} separate clusters — largest has ${plural(s.largest.length, 'capture')}.`
-      : 'All connected captures form a single cluster.');
-  }
-  if (s.isolated.length) {
-    sentences.push(`${plural(s.isolated.length, 'capture')} isolated at this threshold.`);
-  }
-  if (s.topNode && (s.degreeMap.get(s.topNode.id) || 0) > 0) {
-    // BUG-3: topNode can be on either sphere — name the sphere it's
-    // actually centered on, not always the outer one.
-    const sphereLabel = s.topNode.isDC ? 'dream sphere center' : 'equator center';
-    sentences.push(`Most connected (${sphereLabel}): <span class="tid">${esc(label(s.topNode.cap))}</span> `
-      + `(${plural(s.degreeMap.get(s.topNode.id), 'connection')}).`);
-  }
-  return sentences.join(' ');
-}
-
-function renderGraphSummary() {
-  const el = document.getElementById('graph-summary');
-  if (el) el.innerHTML = graphSummaryHtml();
-}
-
 function relationClass(e) {
   return e.type === 'asserted' && e.relation ? ` e-rel-${e.relation}` : '';
 }
 
-function renderGraphStructure() {
-  const edgesG = document.getElementById('graph-edges');
-  const nodesG = document.getElementById('graph-nodes');
-  edgesG.innerHTML = '';
-  for (const l of graphSimLinks) {
-    const directional = l.type === 'reference' || l.type === 'asserted';
-    const isRod = l._s.isDC !== l._t.isDC;
-    const line = svgEl('line', { class: `edge e-${l.type}${relationClass(l)}${isRod ? ' e-rod' : ''}` });
-    if (directional) line.setAttribute('marker-end', 'url(#arrow)');
-    line._link = l;
-    edgesG.appendChild(line);
+function truncateLabel(s, maxLen) {
+  return s.length > maxLen ? s.slice(0, maxLen - 1) + '…' : s;
+}
+
+// Direct connection edges for a capture, ranked the same way mode 3 ranks
+// them (asserted/reference first, then strength), restricted to whatever's
+// currently visible and above the tag-overlap noise floor.
+function egoNeighbors(capId) {
+  const visibleIds = new Set(graphVisibleCaptures().map(c => c.id));
+  if (!visibleIds.has(capId)) return [];
+  const rank = e => e.type === 'asserted' ? 0 : e.type === 'reference' ? 1
+              : e.type === 'entity_overlap' ? 2 : 3;
+  const edges = edgesFor(capId).filter(e => visibleIds.has(otherEnd(e, capId)));
+  return edges
+    .map(e => ({ e, other: byId.get(otherEnd(e, capId)) }))
+    .filter(x => x.other)
+    .sort((a, b) => rank(a.e) - rank(b.e) || b.e.strength - a.e.strength
+      || (b.other.date || '').localeCompare(a.other.date || ''));
+}
+
+// A cluster's "neighbors" are its member captures (tag/role or entity
+// match) — membership, not connection edges.
+function clusterMembers(role, value) {
+  const visible = graphVisibleCaptures();
+  if (role === 'entity') {
+    const ent = DATA.entities.find(e => e.id === value);
+    if (!ent) return [];
+    const idSet = new Set(ent.capture_ids);
+    return visible.filter(c => idSet.has(c.id));
   }
-  nodesG.innerHTML = '';
-  const showLabels = labelsVisible();
-  for (const n of graphNodes) {
-    const c = n.cap;
-    const g = svgEl('g', {
-      class: `node t-${c.type}${c.superseded ? ' superseded' : ''}${c.source === 'ai_extract' ? ' src-ai' : ''}`,
-      'data-id': c.id,
-    });
-    g.appendChild(svgEl('circle', { class: 'body', r: n.r }));
-    if (showLabels) {
-      const text = svgEl('text', { class: 'node-label', x: n.r + 3, y: 3 });
-      text.textContent = label(c);
-      g.appendChild(text);
-      g._label = text;
+  return visible.filter(c => c.tags.some(t => t.role === role && t.value === value));
+}
+
+// ---- landing view: cluster bubbles, same grouping as renderIndex ----
+
+function graphClusters() {
+  const visible = graphVisibleCaptures();
+  const visibleIds = new Set(visible.map(c => c.id));
+  const sections = [];
+  const ents = DATA.entities
+    .map(e => ({ ...e, capture_ids: e.capture_ids.filter(id => visibleIds.has(id)) }))
+    .filter(e => e.capture_ids.length > 0);
+  if (ents.length) {
+    sections.push({ title: 'Entities', items: ents.map(e => ({
+      role: 'entity', value: e.id, display: e.name, count: e.capture_ids.length })) });
+  }
+  for (const [role, title] of ROLE_SECTIONS) {
+    const counts = {};
+    for (const c of visible) {
+      for (const t of c.tags) {
+        if (t.role !== role) continue;
+        (counts[t.value] ||= { display: t.prefix + t.display, n: 0 }).n++;
+      }
     }
-    g._node = n;
-    g.addEventListener('pointerenter', () => showGraphTooltip(n));
-    g.addEventListener('pointerleave', hideGraphTooltip);
-    nodesG.appendChild(g);
+    const items = Object.entries(counts).sort((a, b) => b[1].n - a[1].n)
+      .map(([v, d]) => ({ role, value: v, display: d.display, count: d.n }));
+    if (items.length) sections.push({ title, items });
   }
-  updateGlobeGuides();
-  renderGraphPositions();
-  renderGraphSummary();
+  return sections;
 }
 
-// Keeps the static outline/equator/inner-sphere guide shapes in sync with
-// the current (user-adjustable) globe size, and hides the inner-sphere
-// guide entirely when there are no DC captures to nest inside it.
-function updateGlobeGuides() {
-  document.getElementById('globe-outline').setAttribute('r', globeRadius);
-  document.getElementById('globe-equator').setAttribute('x1', GRAPH_CX - globeRadius);
-  document.getElementById('globe-equator').setAttribute('x2', GRAPH_CX + globeRadius);
-  const dcOutline = document.getElementById('dc-globe-outline');
-  dcOutline.setAttribute('r', dcRadius());
-  dcOutline.style.display = graphNodes.some(n => n.isDC) ? '' : 'none';
+function bubbleSize(count, maxCount) {
+  const t = maxCount > 0 ? count / maxCount : 0;
+  return Math.round(50 + t * 90); // 50..140px
 }
 
-// Projects every node/edge to its current screen position and re-orders the
-// DOM back-to-front (appendChild on an already-attached element moves it,
-// no removal/recreation needed) so nearer elements draw over farther ones —
-// without this the sphere illusion breaks the moment two elements overlap
-// in the wrong z-order. Each element carries its data via a direct property
-// (_node / _link) rather than array-index correspondence, because the
-// reordering itself changes DOM order every single frame. DC nodes project
-// against the smaller inner-sphere radius; everything else against the
-// outer one — both share the same center and rotation angle.
-function renderGraphPositions() {
-  const nodesG = document.getElementById('graph-nodes');
-  const edgesG = document.getElementById('graph-edges');
-  if (!nodesG || !edgesG) return; // graph host was replaced (empty-state message)
-
-  const dcR = dcRadius();
-  const proj = new Map(graphNodes.map(n =>
-    [n.id, projectOnSphere({ lat: n.lat, lon: n.lon }, globeRotation, n.isDC ? dcR : globeRadius)]));
-
-  const nodeOrder = [...nodesG.children]
-    .map(el => ({ el, p: proj.get(el._node.id) }))
-    .sort((a, b) => a.p.depth - b.p.depth);
-  for (const { el, p } of nodeOrder) {
-    const scale = 0.5 + p.depth * 0.6;
-    el.setAttribute('transform', `translate(${p.x},${p.y}) scale(${scale})`);
-    el.style.opacity = String(0.3 + p.depth * 0.7);
-    // Only the near (front-facing) half of the sphere keeps its label
-    // visible each frame — with every node labeled all the time, several
-    // captures land close together on screen at some rotation angles and
-    // their text piles up illegibly. Hiding far-side labels roughly halves
-    // how many are shown at any moment and drops exactly the ones too
-    // small/faint to read anyway. "Always show labels" means always,
-    // including the far side, so it overrides this.
-    if (el._label) el._label.style.display = (graphForceLabels || p.depth > 0.5) ? '' : 'none';
-    nodesG.appendChild(el);
-  }
-
-  const edgeOrder = [...edgesG.children]
-    .map(el => {
-      const l = el._link;
-      const ps = proj.get(l._s.id), pt = proj.get(l._t.id);
-      return { el, ps, pt, depth: (ps.depth + pt.depth) / 2 };
-    })
-    .sort((a, b) => a.depth - b.depth);
-  for (const { el, ps, pt, depth } of edgeOrder) {
-    el.setAttribute('x1', ps.x); el.setAttribute('y1', ps.y);
-    el.setAttribute('x2', pt.x); el.setAttribute('y2', pt.y);
-    el.style.opacity = String(0.1 + depth * 0.7);
-    edgesG.appendChild(el);
-  }
-}
-
-// ---- rotation: a BOUNDED, decaying spin (like a coin settling), never a
-// perpetual animation. spinVelocity decays toward 0 every tick it's active;
-// once it crosses the stop threshold the loop fully stops rescheduling
-// itself (globeLoopRunning=false) rather than idling forever. Reset, the
-// strength slider, and every personalization toggle explicitly zero
-// spinVelocity, so nothing can keep "continuing" underneath a control the
-// user just touched — that was the exact bug reported against the
-// previous (perpetual, never-stopping) version. Dragging or selecting a
-// node PAUSES rotation (freezes it, keeps the loop hot to resume the
-// instant the pause clears) — a materially different state from actually
-// having settled to a stop.
-function startRevealSpin() {
-  if (!graphAutoRotate || prefersReducedMotion) return;
-  spinVelocity = SPIN_INITIAL_VELOCITY;
-  if (!globeLoopRunning) { globeLoopRunning = true; requestAnimationFrame(stepGlobe); }
-}
-function stepGlobe() {
-  if (state.mode !== 'graph') { globeLoopRunning = false; return; }
-  const paused = dragActive || graphSelected !== null;
-  const spinEnabled = graphAutoRotate && !prefersReducedMotion;
-  let stillSpinning = false;
-  if (!paused) {
-    if (spinEnabled && Math.abs(spinVelocity) > SPIN_STOP_THRESHOLD) {
-      globeRotation += spinVelocity;
-      spinVelocity *= SPIN_DECAY;
-      stillSpinning = Math.abs(spinVelocity) > SPIN_STOP_THRESHOLD;
-      if (!stillSpinning) spinVelocity = 0; // clamp the final decayed residual to an exact, clean stop
-    } else {
-      spinVelocity = 0;
-    }
-  }
-  renderGraphPositions();
-  if (paused || stillSpinning) {
-    requestAnimationFrame(stepGlobe); // still spinning, or a temporary pause that will resume
-  } else {
-    globeLoopRunning = false; // settled (or spin disabled) — fully stop until something restarts it
-  }
-}
-
-function ensureGraphInit() {
-  if (graphInitialized) return;
-  graphInitialized = true;
-  const host = document.getElementById('view-graph');
-  if (!DATA.captures.length) {
-    host.innerHTML = '<div class="empty">No captures yet — nothing to graph.</div>';
+function renderGraphLanding(el) {
+  const sections = graphClusters();
+  if (!sections.length) {
+    el.innerHTML = '<div class="empty">Nothing to graph yet — upload some captures.</div>';
     return;
   }
-  buildGraphData(GRAPH_DEFAULT_STRENGTH);
-  wireGraphInteraction();
-  renderGraphStructure();
-  // Hold the initial static view — most-connected capture front and center
-  // on the equator — for a beat before the spin begins, so the viewer
-  // registers "here is my data" before watching it turn.
-  setTimeout(startRevealSpin, 400);
+  let html = '';
+  for (const sec of sections) {
+    const maxCount = Math.max(...sec.items.map(i => i.count));
+    html += `<div class="idx-section"><h2>${esc(sec.title)} <small>· ${sec.items.length}</small></h2>
+      <div class="bubbles">` + sec.items.map(i => {
+        const size = bubbleSize(i.count, maxCount);
+        const valueLit = typeof i.value === 'number' ? i.value : `'${esc(String(i.value))}'`;
+        return `<button class="bubble" style="width:${size}px;height:${size}px"
+          onclick="egoRecenterCluster('${esc(i.role)}', ${valueLit}, '${esc(i.display)}')">
+          <span class="bn">${esc(i.display)}</span><span class="bc">×${i.count}</span></button>`;
+      }).join('') + '</div></div>';
+  }
+  el.innerHTML = html;
 }
 
-function onGraphStrengthChange() {
-  const v = parseFloat(document.getElementById('gminstrength').value);
-  document.getElementById('gminstrength-val').textContent = v.toFixed(1);
-  spinVelocity = 0; // halt any in-progress spin the moment the user adjusts anything
-  buildGraphData(v);
-  clearGraphSelection();
-  renderGraphStructure();
+// ---- drill-in (ego) view ----
+
+function renderGraphView() {
+  document.getElementById('graph-back').style.display = graphHistory.length ? '' : 'none';
+  const landing = document.getElementById('graph-landing');
+  const ego = document.getElementById('graph-ego');
+  if (!graphView.center) {
+    landing.style.display = '';
+    ego.style.display = 'none';
+    renderGraphLanding(landing);
+    return;
+  }
+  landing.style.display = 'none';
+  ego.style.display = '';
+  renderEgoGraph(graphView.center);
 }
 
-function onGlobeSizeChange() {
-  globeRadius = parseFloat(document.getElementById('gsize').value);
-  document.getElementById('gsize-val').textContent = String(globeRadius);
-  spinVelocity = 0;
-  updateGlobeGuides();
-  renderGraphPositions();
+function graphGoBack() {
+  egoShowCount = EGO_NEIGHBOR_CAP;
+  graphView = { center: graphHistory.length ? graphHistory.pop() : null };
+  renderGraphView();
 }
 
-function onGraphSupersededToggle() {
+function egoRecenter(center) {
+  graphHistory.push(graphView.center);
+  egoShowCount = EGO_NEIGHBOR_CAP;
+  graphView = { center };
+  renderGraphView();
+}
+// Landing-bubble clicks stay inside the graph tab's own navigation (push
+// history, so Back returns to the landing view) — unlike gotoGraphCluster,
+// which is for entry points OUTSIDE the graph tab and always starts fresh.
+function egoRecenterCluster(role, value, display) {
+  egoRecenter({ type: 'cluster', role, value, display });
+}
+
+function onGraphFilterChange() {
   graphShowSuperseded = document.getElementById('gshowsup').checked;
-  spinVelocity = 0;
-  globePositions = new Map(); dcGlobePositions = new Map(); // the visible pool changed
-  buildGraphData(currentMinStrength);
-  clearGraphSelection();
-  renderGraphStructure();
-}
-
-function onGraphSourceChange() {
   graphSourceFilter = document.getElementById('gsource').value;
-  spinVelocity = 0;
-  globePositions = new Map(); dcGlobePositions = new Map();
-  buildGraphData(currentMinStrength);
-  clearGraphSelection();
-  renderGraphStructure();
+  renderGraphView();
 }
 
-function onGraphAutoRotateToggle() {
-  graphAutoRotate = document.getElementById('gautorotate').checked;
-  if (graphAutoRotate) startRevealSpin(); else spinVelocity = 0;
+function renderEgoEmpty(msg) {
+  document.getElementById('graph-nodes').innerHTML = '';
+  document.getElementById('graph-edges').innerHTML = '';
+  document.getElementById('ego-open-timeline').style.display = 'none';
+  document.getElementById('graph-legend').innerHTML = '';
+  const emptyEl = document.getElementById('ego-empty');
+  emptyEl.textContent = msg;
+  emptyEl.style.display = '';
 }
 
-function onGraphLabelsToggle() {
-  graphForceLabels = document.getElementById('gforcelabels').checked;
-  renderGraphStructure();
-}
-
-function resetGraphLayout() {
-  // Resets the VIEW, not the data: rotation, size, and every
-  // personalization toggle return to their defaults, and any spin in
-  // progress is explicitly halted — Reset snaps directly to a static
-  // view, it does not replay the intro spin. globePositions/
-  // dcGlobePositions ARE recomputed here (the visible pool may have
-  // changed via the toggles being reset), but which capture sits where
-  // on either sphere is otherwise a stable structural fact this action
-  // does not reshuffle.
-  document.getElementById('gminstrength').value = String(GRAPH_DEFAULT_STRENGTH);
-  document.getElementById('gminstrength-val').textContent = GRAPH_DEFAULT_STRENGTH.toFixed(1);
-  document.getElementById('gsize').value = String(GLOBE_SIZE_DEFAULT);
-  document.getElementById('gsize-val').textContent = String(GLOBE_SIZE_DEFAULT);
-  document.getElementById('gshowsup').checked = false;
-  document.getElementById('gsource').value = '';
-  document.getElementById('gautorotate').checked = true;
-  document.getElementById('gforcelabels').checked = false;
-
-  graphShowSuperseded = false;
-  graphSourceFilter = '';
-  graphAutoRotate = true;
-  graphForceLabels = false;
-  globeRadius = GLOBE_SIZE_DEFAULT;
-  globeRotation = 0;
-  spinVelocity = 0;
-  globePositions = new Map();
-  dcGlobePositions = new Map();
-
-  buildGraphData(GRAPH_DEFAULT_STRENGTH);
-  clearGraphSelection();
-  renderGraphStructure();
-}
-
-// ---- graph interaction: drag anywhere to spin the globe; a stationary
-// click on a node selects it, on empty space deselects ----
-
-function svgPoint(evt) {
-  const svg = document.getElementById('graph-svg');
-  const pt = svg.createSVGPoint();
-  pt.x = evt.clientX; pt.y = evt.clientY;
-  const ctm = svg.getScreenCTM();
-  if (!ctm) return { x: 0, y: 0 };
-  const p = pt.matrixTransform(ctm.inverse());
-  return { x: p.x, y: p.y };
-}
-
-function findNodeAt(target) {
-  let el = target;
-  while (el && !el._node) el = el.parentNode;
-  return el ? el._node : null;
-}
-
-function onSvgPointerDown(ev) {
-  dragActive = true; dragMoved = false;
-  dragNodeHit = findNodeAt(ev.target);
-  dragStartX = svgPoint(ev).x;
-  dragStartRotation = globeRotation;
-  document.getElementById('graph-svg').setPointerCapture(ev.pointerId);
-}
-function onSvgPointerMove(ev) {
-  if (!dragActive) return;
-  const x = svgPoint(ev).x;
-  const dx = x - dragStartX;
-  if (!dragMoved && Math.abs(dx) > 2) {
-    dragMoved = true;
-    document.getElementById('graph-svg').classList.add('dragging');
-  }
-  if (dragMoved) {
-    globeRotation = dragStartRotation + dx * 0.01;
-    renderGraphPositions();
-  }
-}
-function onSvgPointerUp() {
-  if (!dragActive) return;
-  dragActive = false;
-  document.getElementById('graph-svg').classList.remove('dragging');
-  if (!dragMoved) {
-    if (dragNodeHit) selectGraphNode(dragNodeHit);
-    else clearGraphSelection();
+function updateEgoPanelButton(center) {
+  const btn = document.getElementById('ego-open-timeline');
+  if (center.type === 'capture' && byId.get(center.id)) {
+    btn.style.display = '';
+    btn.onclick = () => gotoCapture(center.id);
   } else {
-    spinVelocity = 0; // a manual rotation ends any leftover reveal-spin momentum
+    btn.style.display = 'none';
   }
-  dragNodeHit = null;
 }
 
-function wireGraphInteraction() {
-  const svg = document.getElementById('graph-svg');
-  svg.addEventListener('pointerdown', onSvgPointerDown);
-  svg.addEventListener('pointermove', onSvgPointerMove);
-  svg.addEventListener('pointerup', onSvgPointerUp);
+function renderGraphLegend(caps) {
+  const types = [...new Set(caps.filter(Boolean).map(c => c.type))].sort();
+  document.getElementById('graph-legend').innerHTML = types.map(t =>
+    `<span><i class="dot t-${esc(t)}"></i>${esc(TYPE_LABELS[t] || t)}</span>`).join('');
 }
 
-function selectGraphNode(n) {
-  graphSelected = n.id;
-  const neighborIds = new Set([n.id]);
-  for (const l of graphSimLinks) {
-    if (l._s.id === n.id) neighborIds.add(l._t.id);
-    if (l._t.id === n.id) neighborIds.add(l._s.id);
-  }
-  for (const el of document.getElementById('graph-nodes').children) {
-    el.classList.toggle('dimmed', !neighborIds.has(el._node.id));
-  }
-  for (const el of document.getElementById('graph-edges').children) {
-    const l = el._link;
-    el.classList.toggle('dimmed', l._s.id !== n.id && l._t.id !== n.id);
-  }
-  showGraphPanel(n);
-}
-function clearGraphSelection() {
-  graphSelected = null;
-  for (const el of document.getElementById('graph-nodes').children) el.classList.remove('dimmed');
-  for (const el of document.getElementById('graph-edges').children) el.classList.remove('dimmed');
-  hideGraphPanel();
+function egoLabelForeignObject(r, text, maxLen) {
+  const width = Math.max(70, r * 2.6);
+  const fo = svgEl('foreignObject', { x: -width / 2, y: r + 4, width, height: 30 });
+  const div = document.createElement('div');
+  div.className = 'ego-label';
+  div.textContent = truncateLabel(text, maxLen);
+  fo.appendChild(div);
+  return fo;
 }
 
-function showGraphPanel(n) {
-  const c = n.cap;
-  const panel = document.getElementById('graph-panel');
-  panel.hidden = false;
-  panel.innerHTML = `
-    <h3>${esc(label(c))}</h3>
-    <div class="meta2">${esc(c.type)} · vol ${c.volume} · ${esc(c.date)} · ${n.deg} connection(s)</div>
-    <div>${esc((c.summary || '').slice(0, 140)) || '<i>(no summary)</i>'}</div>
-    <button class="btn" onclick="gotoCapture(${c.id})">Open in Timeline →</button>
-  `;
+function buildEgoNode(cap, x, y, r, onClick) {
+  const g = svgEl('g', {
+    class: `ego-node t-${cap.type}${cap.superseded ? ' superseded' : ''}${cap.source === 'ai_extract' ? ' src-ai' : ''}`,
+    transform: `translate(${x},${y})`,
+  });
+  g.appendChild(svgEl('circle', { class: 'body', r }));
+  g.appendChild(egoLabelForeignObject(r, label(cap), 30));
+  g.addEventListener('click', onClick);
+  return g;
 }
-function hideGraphPanel() { document.getElementById('graph-panel').hidden = true; }
 
-function showGraphTooltip(n) {
-  const p = projectOnSphere({ lat: n.lat, lon: n.lon }, globeRotation, n.isDC ? dcRadius() : globeRadius);
-  // A static label is only actually legible for THIS node right now if
-  // labels are rendered at all AND (force-on, or it's currently far-side
-  // enough to have been hidden per the same rule renderGraphPositions
-  // uses) — checking only the blanket node-count gate would skip the
-  // tooltip for a node whose own label is invisible at this rotation,
-  // leaving it with no identification at all.
-  if (labelsVisible() && (graphForceLabels || p.depth > 0.5)) return;
-  const tip = document.getElementById('graph-tooltip');
-  tip.hidden = false;
-  tip.textContent = label(n.cap);
-  const svg = document.getElementById('graph-svg');
-  const rect = svg.getBoundingClientRect();
-  tip.style.left = (p.x * (rect.width / GRAPH_W)) + 'px';
-  tip.style.top = (p.y * (rect.height / GRAPH_H)) + 'px';
+function buildEgoCenterNode(cls, display) {
+  const g = svgEl('g', { class: `ego-node ${cls}`, transform: `translate(${GRAPH_CX},${GRAPH_CY})` });
+  g.appendChild(svgEl('circle', { class: 'body', r: EGO_CENTER_R }));
+  g.appendChild(egoLabelForeignObject(EGO_CENTER_R, display, 46));
+  return g;
 }
-function hideGraphTooltip() { document.getElementById('graph-tooltip').hidden = true; }
+
+function buildEgoMoreNode(count, x, y) {
+  const g = svgEl('g', { class: 'ego-node more', transform: `translate(${x},${y})` });
+  g.appendChild(svgEl('circle', { class: 'body', r: EGO_NEIGHBOR_R }));
+  g.appendChild(egoLabelForeignObject(EGO_NEIGHBOR_R, `+${count} more`, 30));
+  // Grows by one more ring's worth per click (like Timeline's Load More),
+  // never jumps straight to "show all" — real KSJ captures can carry
+  // hundreds of tag-overlap edges, and a ring with hundreds of nodes at
+  // once is exactly the illegible overlap this cap exists to prevent.
+  g.addEventListener('click', () => { egoShowCount += EGO_NEIGHBOR_CAP; renderGraphView(); });
+  return g;
+}
+
+function renderEgoGraph(center) {
+  document.getElementById('ego-empty').style.display = 'none';
+  let centerDisplay, centerCls, itemsAll;
+
+  if (center.type === 'capture') {
+    const centerCap = byId.get(center.id);
+    if (!centerCap) { renderEgoEmpty('That capture is not visible under the current filters.'); return; }
+    centerDisplay = label(centerCap);
+    centerCls = `t-${centerCap.type}`;
+    itemsAll = egoNeighbors(center.id).map(x => ({ cap: x.other, edge: x.e }));
+  } else {
+    centerDisplay = center.display;
+    centerCls = 'cluster';
+    itemsAll = clusterMembers(center.role, center.value)
+      .slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+      .map(c => ({ cap: c, edge: null }));
+  }
+
+  updateEgoPanelButton(center);
+
+  const nodesG = document.getElementById('graph-nodes');
+  const edgesG = document.getElementById('graph-edges');
+  nodesG.innerHTML = ''; edgesG.innerHTML = '';
+
+  const shown = itemsAll.slice(0, egoShowCount);
+  const moreCount = Math.max(0, itemsAll.length - egoShowCount);
+  const slots = shown.length + (moreCount > 0 ? 1 : 0);
+
+  shown.forEach((item, i) => {
+    const angle = (2 * Math.PI * i) / slots - Math.PI / 2;
+    const x = GRAPH_CX + EGO_RING_R * Math.cos(angle);
+    const y = GRAPH_CY + EGO_RING_R * Math.sin(angle);
+    const edgeClass = item.edge ? `ego-edge e-${item.edge.type}${relationClass(item.edge)}` : 'ego-edge';
+    const line = svgEl('line', { class: edgeClass, x1: GRAPH_CX, y1: GRAPH_CY, x2: x, y2: y });
+    if (item.edge && (item.edge.type === 'reference' || item.edge.type === 'asserted')) {
+      line.setAttribute('marker-end', 'url(#arrow)');
+    }
+    edgesG.appendChild(line);
+    nodesG.appendChild(buildEgoNode(item.cap, x, y, EGO_NEIGHBOR_R,
+      () => egoRecenter({ type: 'capture', id: item.cap.id })));
+  });
+
+  if (moreCount > 0) {
+    const angle = (2 * Math.PI * shown.length) / slots - Math.PI / 2;
+    const x = GRAPH_CX + EGO_RING_R * Math.cos(angle);
+    const y = GRAPH_CY + EGO_RING_R * Math.sin(angle);
+    edgesG.appendChild(svgEl('line', { class: 'ego-edge', x1: GRAPH_CX, y1: GRAPH_CY, x2: x, y2: y }));
+    nodesG.appendChild(buildEgoMoreNode(moreCount, x, y));
+  }
+
+  nodesG.appendChild(buildEgoCenterNode(centerCls, centerDisplay));
+  renderGraphLegend([center.type === 'capture' ? byId.get(center.id) : null, ...shown.map(s => s.cap)]);
+}
 
 (function init() {
   const caps = DATA.captures;

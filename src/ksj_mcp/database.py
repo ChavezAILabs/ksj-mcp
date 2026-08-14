@@ -583,16 +583,25 @@ def get_question_captures(con: sqlite3.Connection) -> list[dict]:
             ).fetchall()
         ]
 
-        # Connected captures that carry $ insight tags
+        # Connected captures that carry $ insight tags — ranked by strongest
+        # edge and capped, matching find_connections()'s limit pattern.
+        # Unranked/uncapped here produced a single flashcard's Back field
+        # joining hundreds of insight summaries on a well-connected journal
+        # (13.9MB response observed on a 986-capture / 331k-edge corpus during
+        # the v3.6.0 QA pass) — a handful of the strongest connections is what
+        # a usable study card actually needs.
         connected = con.execute(
-            """SELECT DISTINCT cap2.id, cap2.summary, cap2.template_id
+            """SELECT cap2.id, cap2.summary, cap2.template_id, MAX(conn.strength) AS best_strength
                FROM connections conn
                JOIN captures cap2 ON cap2.id = CASE
                    WHEN conn.source_id=? THEN conn.target_id
                    ELSE conn.source_id
                END
                JOIN tags t ON t.capture_id = cap2.id AND t.prefix = '$'
-               WHERE conn.source_id=? OR conn.target_id=?""",
+               WHERE conn.source_id=? OR conn.target_id=?
+               GROUP BY cap2.id
+               ORDER BY best_strength DESC
+               LIMIT 5""",
             (cid, cid, cid),
         ).fetchall()
 

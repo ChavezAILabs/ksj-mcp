@@ -1,6 +1,6 @@
 [project]
 name = "ksj-mcp"
-version = "3.5.0"
+version = "3.6.0"
 description = "KSJ v2.0 MCP server — turns journal photos into a searchable AI knowledge base"
 readme = "README.md"
 license = { text = "MIT" }

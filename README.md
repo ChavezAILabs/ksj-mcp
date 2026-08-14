@@ -8,7 +8,7 @@
 
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
-**Current release: ksj-mcp v3.5.0** · built on **MCP SDK v2.0.0**
+**Current release: ksj-mcp v3.6.0** · built on **MCP SDK v2.0.0**
 
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
 
@@ -127,6 +127,8 @@ This server uses **MCP (Model Context Protocol)**, an open standard with growing
 
 **Using ChatGPT, Gemini, or another platform?**
 Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, then paste it into your AI assistant of choice. Full native MCP support for additional platforms is on the roadmap as the ecosystem grows.
+
+**Protocol compliance:** ksj-mcp runs on the official Python MCP SDK v2.0.0 over the stdio transport, using the protocol's classic initialize-handshake model — negotiated up to protocol revision `2025-11-25`. (MCP is versioned by dated spec release, not semantic version — "MCP SDK v2.0.0" above refers to the SDK package's own version number, not the protocol revision.)
 
 ---
 
@@ -303,13 +305,17 @@ Once connected, talk to your AI assistant naturally.
 > "How's my journal practice looking?"
 
 > "Give me a browsable view of my whole knowledge base" → writes a self-contained
-> `.html` file — timeline (with date-range search), tag/entity index,
-> per-capture connection lists, and a slowly rotating connection globe — you
-> can open in any browser, no server or install required
+> `.html` file — timeline (with date-range search and a 25-at-a-time load-more),
+> tag/entity index, per-capture connection lists, and an ego-centric connection
+> graph (click a tag cluster or a capture to see its local neighborhood, click
+> any neighbor to recenter) — you can open in any browser, no server or install
+> required
 
 ---
 
 ## Available tools
+
+All 36 tools below were individually exercised (real-data and bad-input cases) as part of the v3.6.0 ship-readiness pass. One scaling issue was found and fixed during the pass: `export_study_deck` on a very large knowledge base could join far too many connected insights into a single flashcard — now ranked by connection strength and capped.
 
 ### Journal tools
 
@@ -330,7 +336,7 @@ Once connected, talk to your AI assistant naturally.
 | `lint` | Health check: orphan captures, un-closed superseded claims, unresolved contradictions, stale open questions, fragmented tags |
 | `export_backup` | Full knowledge base to a versioned JSONL file ([format doc](docs/EXPORT_FORMAT.md)) |
 | `import_backup` | Restore a JSONL backup — additive, nothing overwritten |
-| `export_html` | Self-contained, offline HTML view — timeline with date search, tag/entity index, per-capture connection lists, and a rotating connection globe, opens in any browser |
+| `export_html` | Self-contained, offline HTML view — timeline with date search and load-more, tag/entity index, per-capture connection lists, and an ego-centric connection graph, opens in any browser |
 | `search_captures` | Full-text search with optional tag and date filters |
 | `list_by_tag` | Browse all captures with a given tag or prefix |
 | `find_connections` | Show tag-overlap and `@`-reference connections for a capture |

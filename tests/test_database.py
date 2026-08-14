@@ -445,6 +445,26 @@ class TestGetQuestionCaptures:
         assert len(results[0]["insights"]) == 1
         assert results[0]["insights"][0]["template_id"] == "RC-002"
 
+    def test_insights_capped_and_ranked_by_strength(self, db):
+        # A question capture connected to more insight-carrying captures than
+        # the cap should return only the strongest few, not every match —
+        # regression test for the unbounded-join bug found in the v3.6.0 QA
+        # pass (export_study_deck produced a 13.9MB flashcard on real data).
+        q_id = _insert_rc(db, "RC-001")
+        insert_tags(db, q_id, [{"prefix": "?", "value": "what-is-attention"}])
+        for i in range(8):
+            ins_id = _insert_rc(db, f"RC-{100+i}", summary=f"Insight {i}")
+            insert_tags(db, ins_id, [{"prefix": "$", "value": f"insight-{i}"}])
+            insert_connection(db, q_id, ins_id, "tag_overlap", float(i + 1), "tag_overlap")
+        db.commit()
+        results = get_question_captures(db)
+        insights = results[0]["insights"]
+        assert len(insights) == 5
+        # Strongest edges (7.0, 6.0, ...) win over weaker ones (1.0, 2.0, ...)
+        assert {i["template_id"] for i in insights} == {
+            "RC-107", "RC-106", "RC-105", "RC-104", "RC-103",
+        }
+
 
 # ── get_syn_breakthroughs ──────────────────────────────────────────────────────
 
