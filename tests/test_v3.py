@@ -15,6 +15,7 @@ from ksj_mcp.connections import (
     rebuild_connections,
 )
 from ksj_mcp.database import (
+    migrate_v37,
     check_duplicate,
     get_active_volumes,
     get_capture,
@@ -365,6 +366,7 @@ class TestMigrateV3:
         db_path = self._make_v2_db(tmp_path)
         assert migrate_v3(db_path) is True
         migrate_v31(db_path)  # startup chain — search helpers assume v3.1 columns
+        migrate_v37(db_path)
 
         con = get_connection(db_path)
         cols = {r[1] for r in con.execute("PRAGMA table_info(captures)").fetchall()}

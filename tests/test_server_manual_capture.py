@@ -73,9 +73,12 @@ class TestTemplateIdDetection:
         result = server_mod.manual_capture(RC_TEXT, template_id="XX-001")
         assert "Could not parse" in result
 
-    def test_no_template_id_in_text_returns_error(self):
+    def test_no_template_id_in_text_is_kept_as_wild_art(self):
+        # v3.7 accept-by-default: stored as WA instead of rejected
         result = server_mod.manual_capture("No template marker here at all.")
-        assert "Could not detect" in result
+        assert "Stored capture #" in result
+        assert "Wild Art WA-001" in result
+        assert "unrecognized_template" in result
 
     def test_syn_template_detected(self):
         syn_text = "SYN-003\nBreakthrough: connections confirmed.\n$synthesis #patterns"

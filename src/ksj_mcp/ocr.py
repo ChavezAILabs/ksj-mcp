@@ -203,7 +203,9 @@ _ID_CONFUSIONS = str.maketrans({
     'S': '5', 's': '5', 'B': '8', 'Z': '2', 'z': '2', 'G': '6',
 })
 
-_STRICT = re.compile(r'\b(RC|SYN|REV|DC)-(\d{3})([a-z])?\b', re.IGNORECASE)
+# ISO (3-D isometric grid pages) is matched strictly only: a loose "ISO 400"
+# in page text is far more likely a camera setting than a page ID.
+_STRICT = re.compile(r'\b(RC|SYN|REV|DC|ISO)-(\d{3})([a-z])?\b', re.IGNORECASE)
 
 _LOOSE = re.compile(
     r'(?:(?:V|VOL|BOOK)\s*(\d+)\s*[-\s])?'       # optional volume marker (V2-RC-001)
@@ -229,7 +231,7 @@ def parse_template_id(text: str) -> dict:
 
     Returns:
         {
-          "template_type": "RC" | "SYN" | "REV" | "DC" | "UNKNOWN",
+          "template_type": "RC" | "SYN" | "REV" | "DC" | "ISO" | "UNKNOWN",
           "template_id":   str,          # normalized "RC-001" (empty if unknown)
           "page_suffix":   str | None,   # stray trailing letter, preserved not interpreted
           "volume":        int | None,   # only when written on the page (V2 ...)
@@ -290,7 +292,7 @@ def extract_text(image_path: str | Path) -> dict:
     Returns:
         {
           "raw_text":      str,
-          "template_type": str,   # RC | SYN | REV | DC | UNKNOWN
+          "template_type": str,   # RC | SYN | REV | DC | ISO | UNKNOWN
           "template_id":   str,   # e.g. RC-001 (empty if unknown)
           "page_suffix":   str | None,
           "volume":        int | None,   # only if written on the page

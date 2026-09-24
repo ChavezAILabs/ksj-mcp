@@ -9,6 +9,9 @@ Template IDs and their right-page sections:
   SYN — Breakthrough / Patterns / Connections / tags
   REV — Process Notes / Observations / tags
   DC  — Dream Narrative / Symbols / Emotions / tags
+  ISO — 3-D isometric grid page: Subject / Notes / tags (mostly drawing)
+  WA  — Wild Art: no template of its own; parsed with the page type it was
+        read as (if any) so promotion loses nothing, else kept as raw text
 """
 
 import re
@@ -35,7 +38,7 @@ _ARROW_TAG = re.compile(
 # @-values that look like a template ID are references; anything else is a
 # named entity (dream symbol, person, place, work). The DC template shipped
 # this convention on paper first — @symbol — and it generalizes.
-_TEMPLATE_ID_VALUE = re.compile(r'^(RC|SYN|REV|DC|AIEX)-?\d{1,4}[a-z]?$', re.IGNORECASE)
+_TEMPLATE_ID_VALUE = re.compile(r'^(RC|SYN|REV|DC|ISO|WA|AIEX)-?\d{1,4}[a-z]?$', re.IGNORECASE)
 
 
 def normalize_tag_value(value: str) -> str:
@@ -144,7 +147,8 @@ def _extract_section(text: str, *headers: str) -> str:
 
 def _build_summary(fields: dict[str, Any], max_len: int = 200) -> str:
     """Build a one-line summary from the most informative field."""
-    for key in ("first_impressions", "breakthrough", "process_notes", "dream_narrative"):
+    for key in ("first_impressions", "breakthrough", "process_notes", "dream_narrative",
+                "subject"):
         val = fields.get(key, "").strip()
         if val:
             return val[:max_len].replace("\n", " ")
@@ -242,6 +246,30 @@ def parse_dc(text: str) -> dict[str, Any]:
     }
 
 
+def _extract_inline(text: str, *labels: str) -> str:
+    """Value written on the same line as its label ("Subject: exploded view")."""
+    for label in labels:
+        m = re.search(rf'(?im)^\s*{re.escape(label)}\s*[:\-]\s*(\S.*)$', text)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def parse_iso(text: str) -> dict[str, Any]:
+    """
+    Parse a 3-D isometric grid (ISO) page. These pages are mostly drawing —
+    the text is whatever labels, subject line, and notes accompany it. A
+    subject is usually one line, so same-line values count too.
+    """
+    return {
+        "subject": (_extract_section(text, "subject", "title")
+                    or _extract_inline(text, "subject", "title")),
+        "notes":   (_extract_section(text, "notes", "note", "description", "caption")
+                    or _extract_inline(text, "notes", "note", "description", "caption")),
+        "tags_raw": _extract_section(text, "tags", "tag") or _extract_inline(text, "tags", "tag"),
+    }
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 _PARSERS = {
@@ -249,6 +277,7 @@ _PARSERS = {
     "SYN": parse_syn,
     "REV": parse_rev,
     "DC":  parse_dc,
+    "ISO": parse_iso,
 }
 
 

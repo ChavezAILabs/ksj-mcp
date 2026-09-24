@@ -8,7 +8,7 @@
 
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
-**Current release: ksj-mcp v3.6.2** · built on **MCP SDK v2.0.0**
+**Current release: ksj-mcp v3.7.0** · built on **MCP SDK v2.0.0**
 
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
 
@@ -24,6 +24,7 @@ Turn your handwritten journal photos into a searchable, AI-powered knowledge bas
 - [Usage](#usage)
 - [Available tools](#available-tools)
 - [Schema tag system](#schema-tag-system)
+- [Wild Art: nothing is ever rejected](#wild-art-nothing-is-ever-rejected)
 - [Multiple journals (volumes)](#multiple-journals-volumes)
 - [Troubleshooting](#troubleshooting)
 - [Data location](#data-location)
@@ -57,7 +58,9 @@ Photograph a journal page, show it to your AI assistant, and it can:
 
 Either way, a bad read is never permanent: `correct_ocr` replaces a stored
 capture's text and re-runs parsing, tags, and connections, while the original
-read is preserved.
+read is preserved. And nothing you upload is ever rejected — a page that can't
+be filed normally lands in [Wild Art](#wild-art-nothing-is-ever-rejected)
+for review instead.
 
 ### AI research sessions → structured insights
 
@@ -126,7 +129,7 @@ This server uses **MCP (Model Context Protocol)**, an open standard with growing
 **Using ChatGPT, Gemini, or another platform?**
 Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, then paste it into your AI assistant of choice. Full native MCP support for additional platforms is on the roadmap as the ecosystem grows.
 
-**Protocol compliance:** ksj-mcp runs on the official Python MCP SDK v2.0.0 over the stdio transport, using the protocol's classic initialize-handshake model — negotiated up to protocol revision `2025-11-25`. (MCP is versioned by dated spec release, not semantic version — "MCP SDK v2.0.0" above refers to the SDK package's own version number, not the protocol revision.)
+**Protocol compliance:** ksj-mcp runs on the official Python MCP SDK v2.0.0 over the stdio transport. The server is dual-era: it answers the classic `initialize` handshake (negotiated up to protocol revision `2025-11-25`), and a client that opens with the `2026-07-28` per-request envelope gets the modern era, including `server/discover`. Which era is used is the client's choice. Since v3.7.0 the server answers the handshake before it opens your knowledge base, so startup time no longer grows with the size of your journal. (MCP is versioned by dated spec release, not semantic version — "MCP SDK v2.0.0" above refers to the SDK package's own version number, not the protocol revision.)
 
 ---
 
@@ -167,8 +170,13 @@ Verify with `uv tool list` — it should list `ksj-mcp` with a version number.
 
 **To update later:**
 ```bash
-uv tool upgrade ksj-mcp
+uv tool install --reinstall --compile-bytecode --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
 ```
+`--reinstall` matters: a plain `uv tool install` silently does nothing when the
+version number hasn't changed. `--compile-bytecode` precompiles the server and
+its libraries at install time, so the first launch afterwards isn't slowed by
+compiling them (measured ~0.8 s faster on Linux; more on Windows). Fully quit
+and reopen your AI client afterwards, then ask it to run `get_version`.
 
 ### Step 3 — Register the server
 
@@ -319,38 +327,49 @@ Once connected, talk to your AI assistant naturally.
 > tag/entity index, per-capture connection lists, and an ego-centric connection
 > graph (click a tag cluster or a capture to see its local neighborhood, click
 > any neighbor to recenter) — you can open in any browser, no server or install
-> required
+> required. Both the in-page **← Back** button and your browser's Back button
+> step back through the views you visited, and a reload reopens the same view.
+
+**Wild Art & loose captures:**
+> *[share a photo of a napkin sketch]* "Add this napkin sketch as a loose capture"
+
+> "What's waiting in Wild Art?" → `list_by_tag(entry_type="WA")`
+
+> "WA-003 is actually RC-021 — file it" → `promote_capture`
+
+> "SYN-006 develops the napkin idea in WA-004 — link them"
 
 ---
 
 ## Available tools
 
-All 36 tools below were individually exercised (real-data and bad-input cases) as part of the v3.6.0 ship-readiness pass. One scaling issue was found and fixed during the pass: `export_study_deck` on a very large knowledge base could join far too many connected insights into a single flashcard — now ranked by connection strength and capped.
+37 tools. All 36 tools that existed at v3.6.0 were individually exercised (real-data and bad-input cases) as part of the v3.6.0 ship-readiness pass. One scaling issue was found and fixed during the pass: `export_study_deck` on a very large knowledge base could join far too many connected insights into a single flashcard — now ranked by connection strength and capped.
 
 ### Journal tools
 
 | Tool | What it does |
 |------|-------------|
 | `get_version` | Report the running ksj-mcp, mcp, pydantic, and Python versions — confirms an install or upgrade actually took effect |
-| `manual_capture` | Store a page your assistant transcribed with vision — the primary capture path |
-| `upload_capture` | OCR a journal photo locally (Tesseract), parse the template, store it, highlight strongest connection |
+| `manual_capture` | Store a page your assistant transcribed with vision — the primary capture path. Never rejects: a page it can't file lands in Wild Art. Also takes 3-D isometric pages (`ISO-001`) and loose captures (`wa_reason="loose_capture"`) |
+| `upload_capture` | OCR a journal photo locally (Tesseract), parse the template, store it, highlight strongest connection — never rejects (see Wild Art) |
+| `promote_capture` | File a Wild Art entry under its proper type (RC / SYN / REV / DC / ISO). Refuses an occupied page ID instead of overwriting or renumbering; keeps the WA history |
 | `correct_ocr` | Replace a stored capture's text with a corrected transcription — re-parses tags and connections, preserves the original |
-| `identify_capture` | Assign or fix a capture's template ID — pages with unreadable IDs are stored, never discarded |
-| `bulk_upload` | Process a whole folder of photos at once (local OCR) |
+| `identify_capture` | Assign or fix a stored capture's template ID (for a Wild Art entry it runs `promote_capture`) |
+| `bulk_upload` | Process a whole folder of photos at once (local OCR) — pages it can't file are kept as Wild Art, not skipped |
 | `set_volume` | Multiple journals: set which book new captures go into and which books search sees |
 | `assert_entity` | Link a named entity (person, place, work, dream symbol) to a capture |
-| `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports / distills / assesses / observes another — superseded claims are kept in history but leave current search |
+| `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports / distills / assesses / observes / develops another (`develops`: a journal entry that works out an idea first scribbled in a loose capture) — superseded claims are kept in history but leave current search |
 | `rebuild_connections` | Re-derive the connection graph from current tags and text (asserted edges are never touched) |
 | `find_path` | Shortest chain of connections between two captures |
 | `neighborhood` | Everything within N hops of a capture — its local knowledge cluster |
 | `lint` | Health check: orphan captures, un-closed superseded claims, unresolved contradictions, stale open questions, fragmented tags |
 | `export_backup` | Full knowledge base to a versioned JSONL file ([format doc](docs/EXPORT_FORMAT.md)) |
 | `import_backup` | Restore a JSONL backup — additive, nothing overwritten |
-| `export_html` | Self-contained, offline HTML view — timeline with date search and load-more, tag/entity index, per-capture connection lists, and an ego-centric connection graph, opens in any browser |
-| `search_captures` | Full-text search with optional tag and date filters |
-| `list_by_tag` | Browse all captures with a given tag or prefix |
+| `export_html` | Self-contained, offline HTML view — timeline with date search and load-more, tag/entity index, per-capture connection lists, and an ego-centric connection graph; in-page and browser Back both step through views; footer records versions, export time, and counts. Opens in any browser |
+| `search_captures` | Full-text search with optional tag, date, entry type, and Wild Art reason filters |
+| `list_by_tag` | Browse captures by tag or prefix — or by entry type / Wild Art reason, e.g. the whole Wild Art queue |
 | `find_connections` | Show tag-overlap and `@`-reference connections for a capture |
-| `get_stats` | Overview: counts, top tags, open questions, insights, date range |
+| `get_stats` | Overview: counts, top tags, open questions, insights, date range, Wild Art split into "needs attention" and loose captures |
 | `export_captures` | Dump your knowledge base as Markdown or JSON |
 | `suggest_synthesis` | Find RC topic clusters ready to become a SYN entry |
 | `surface_connections` | Independently scan the RC cluster behind a SYN page you've already written, then run a structured comparison dialogue — runs after the page exists, never before; no DB write |
@@ -415,6 +434,43 @@ Three things the server does with these automatically:
 
 ---
 
+## Wild Art: nothing is ever rejected
+
+Named for the L.A. Times "Wild Art" feature: the best slice-of-life shots that
+belonged to no assignment but still ran in the paper.
+
+Any page the server can't file normally is stored as a **Wild Art (WA)**
+entry (`WA-001`, `WA-002`, …) instead of being rejected. Its text, tags,
+photo, and connections are kept exactly as for any other page, and the reason
+is recorded:
+
+| Reason | When |
+|--------|------|
+| `id_conflict` | The page ID is already taken in that volume. The existing page is untouched, and the WA entry records the ID it was read as and which capture holds it |
+| `unrecognized_template` | No template ID could be read |
+| `ocr_low_confidence` | The ID was only read loosely from a low-confidence OCR pass |
+| `validation_error` | E.g. an explicit template ID that doesn't parse |
+| `loose_capture` | On purpose: anything off-journal, like a napkin sketch, sticky note, whiteboard photo, or the back of a receipt. No volume or page ID needed |
+| `manual` / `other` | Filed as Wild Art by hand / anything else |
+
+- **Review:** `list_by_tag(entry_type="WA")`, optionally with `wa_reason=…`.
+  `get_stats` and `journal_health` report real failures ("needs attention")
+  separately from loose captures ("no action needed").
+- **File it:** `promote_capture(capture_id, "RC", "RC-021")` moves it to its
+  proper type and keeps `promoted_from` and the original reason. If the page ID
+  is already taken, nothing changes: you choose a different ID or volume. IDs
+  are never renumbered automatically.
+- **Link a scribble:** when a journal entry develops a loose capture's idea,
+  `assert_connection(entry, scribble, "develops")` links them and keeps the
+  scribble as the source.
+
+**3-D isometric pages** (not dot-grid) have their own type, **ISO**
+(`ISO-001`, …). Store them with `manual_capture(template_id="ISO-001")`,
+transcribing the subject line, labels, and notes around the drawing. They
+show up under their own type in search, Index, and the Timeline filters.
+
+---
+
 ## Multiple journals (volumes)
 
 Finished a journal and started a second one? The new book starts over at
@@ -428,8 +484,11 @@ When you start a new book, say so once:
 
 Or write the volume on the page itself (e.g. `V2` next to the template ID),
 or pass `volume=2` on a single upload. If an upload collides with an existing
-page ID, the server asks whether it's a new journal or a re-capture — nothing
-is ever silently overwritten.
+page ID, it's kept as Wild Art (`id_conflict`) and the assistant asks what it is:
+a page from a new journal (`promote_capture(…, volume=2)`), a misread ID
+(`promote_capture` with the right ID), or a cleaner re-capture of the same page
+(re-upload with `force=True`). Nothing is ever silently overwritten, and a page
+is never filed into the wrong volume to get around a conflict.
 
 ---
 
@@ -438,15 +497,17 @@ is ever silently overwritten.
 **"Tesseract OCR is not installed"**
 You called `upload_capture`/`bulk_upload`, which need the optional local OCR engine. Either install Tesseract ([Optional: offline OCR](#optional-offline-ocr-tesseract)) and restart your AI client — or skip it entirely: share the photo in chat and ask your assistant to read and store the page instead.
 
-**"Stored as UNIDENTIFIED"**
-The template ID couldn't be read from the photo, but the page and its text were stored anyway — nothing is lost. Tell your assistant the correct ID ("that's RC-007") and it will fix it with `identify_capture`. Sloppy or unpadded IDs (`RC-7`, `RC-OO2`, a stray letter after the number) are read automatically with a confirmation note.
+**"Stored as Wild Art … unrecognized_template"** (or UNIDENTIFIED, for pages stored before v3.7)
+The template ID couldn't be read from the photo, but the page and its text were stored anyway, so nothing is lost. Tell your assistant the correct ID ("that's RC-007") and it will file it with `promote_capture` (or `identify_capture` for a pre-3.7 UNIDENTIFIED page). Sloppy or unpadded IDs (`RC-7`, `RC-OO2`, a stray letter after the number) are read automatically with a confirmation note.
 
 **OCR got the text wrong**
 Ask your assistant to fix it with `correct_ocr` — give it the capture number and the corrected text. The original read is preserved, and tags and connections are rebuilt from the correction.
 
-**"RC-001 already exists in your knowledge base"**
-You're re-uploading a page that's already stored. To replace it with the new photo (e.g. after a cleaner retake), ask your AI assistant to upload with `force=True`:
+**"Stored as Wild Art … id_conflict — RC-001 already exists"**
+The page ID is already taken, so the new page was kept as Wild Art and the original is untouched. If it's a cleaner retake of the same page and you want it to replace the original, upload with `force=True`:
 > "Upload /path/to/RC-001.jpg with force=True"
+
+If it's a page from a new journal, or its ID was misread, file it with `promote_capture` instead.
 
 **"Server transport closed unexpectedly" / server not starting**
 Run `uv tool list` in a terminal — it should list `ksj-mcp` with a version number. If it's missing, re-run the install command from Step 2. If it's installed, the issue is likely the Claude Desktop config — double-check it is valid JSON and that `command` is the **full path** to the `ksj-mcp` binary (see [Step 3](#step-3--register-the-server)), not just `"ksj-mcp"`.
@@ -472,8 +533,10 @@ All your captures are stored locally in `~/.ksj-mcp/`:
 ```
 
 Your data is never sent anywhere and persists across updates. Schema
-upgrades run automatically on server start; before the first 3.0 start your
-database is backed up to `captures.db.bak-v3` in the same folder.
+upgrades run automatically in the background right after the server starts,
+and tools wait for them to finish. Before a schema change, your database is
+backed up in the same folder: to `captures.db.bak-v3` before the first 3.0
+start, and to `captures.db.bak-v37` before the first 3.7 start.
 
 **Custom location:** Set the `KSJ_DATA_DIR` environment variable in your config to store data elsewhere:
 

@@ -22,11 +22,41 @@ _DEFAULT_DB = (
     else Path.home() / ".ksj-mcp" / "captures.db"
 )
 
+# ── Wild Art (WA) ─────────────────────────────────────────────────────────────
+#
+# Accept-by-default: a page that fails classification, validation, or ID
+# assignment is stored as a WA entry instead of being rejected. WA is also the
+# deliberate intake for off-journal material (loose_capture). Named for the
+# L.A. Times "Wild Art" feature — the shots that belonged to no assignment
+# but still ran.
+
+WA_REASONS = (
+    "id_conflict",            # the page ID was already claimed
+    "unrecognized_template",  # no template ID could be read
+    "ocr_low_confidence",     # ID read only loosely from a low-confidence OCR pass
+    "validation_error",       # e.g. an explicit template ID that doesn't parse
+    "loose_capture",          # napkin, sticky note, whiteboard — deliberate, not a failure
+    "manual",                 # filed as WA by hand
+    "other",
+)
+# Everything except loose captures is a real failure awaiting review.
+WA_ATTENTION_REASONS = tuple(r for r in WA_REASONS if r != "loose_capture")
+
+# Journal page types a WA entry can be promoted to.
+PAGE_TYPES = ("RC", "SYN", "REV", "DC", "ISO")
+
+_WA_COLUMNS = (
+    "wa_reason", "wa_detail", "claimed_page_id", "conflicts_with",
+    "promoted_from", "promoted_at",
+)
+
 
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     path = db_path or _DEFAULT_DB
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    # A generous busy timeout: a second ksj instance (Claude Desktop runs one
+    # per client lane) may be mid-write; waiting beats failing the tool call.
+    con = sqlite3.connect(path, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
@@ -38,10 +68,10 @@ def init_db(db_path: Path | None = None) -> None:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS captures (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','AIEX','UNKNOWN')),
-                template_id TEXT,                    -- e.g. RC-001; NULL = unidentified page
+                type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','ISO','WA','AIEX','UNKNOWN')),
+                template_id TEXT,                    -- e.g. RC-001, WA-003; NULL = unidentified page
                 page_suffix TEXT,                    -- stray trailing letter (tolerated, not interpreted)
-                volume      INTEGER NOT NULL DEFAULT 1,
+                volume      INTEGER DEFAULT 1,       -- NULL only for loose (off-journal) WA captures
                 content_json TEXT NOT NULL,          -- parsed fields as JSON
                 raw_ocr     TEXT NOT NULL,
                 corrected_ocr TEXT,                  -- user-corrected transcription (raw_ocr preserved)
@@ -51,7 +81,15 @@ def init_db(db_path: Path | None = None) -> None:
                 source      TEXT NOT NULL DEFAULT 'journal',  -- 'journal' | 'ai_extract'
                 valid_from  TEXT,                -- bi-temporal: when this claim became current
                 valid_until TEXT,                -- set when superseded; the row is never deleted
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                -- Wild Art (v3.7): why a page was filed as WA instead of rejected,
+                -- and its promotion history once it is moved to a proper type.
+                wa_reason       TEXT,            -- see WA_REASONS; kept after promotion
+                wa_detail       TEXT,            -- free text: original error, "napkin", ...
+                claimed_page_id TEXT,            -- page ID the page carried / was read as
+                conflicts_with  INTEGER REFERENCES captures(id) ON DELETE SET NULL,
+                promoted_from   TEXT,            -- the WA-NNN ID this capture was promoted from
+                promoted_at     TEXT
             );
 
             CREATE TABLE IF NOT EXISTS tags (
@@ -70,7 +108,7 @@ def init_db(db_path: Path | None = None) -> None:
                 type        TEXT NOT NULL,           -- tag_overlap | entity_overlap | reference | asserted
                 strength    REAL NOT NULL DEFAULT 1.0,
                 method      TEXT NOT NULL,
-                relation    TEXT,                    -- supersedes | refutes | narrows | supports | distills | assesses | observes (asserted only)
+                relation    TEXT,                    -- supersedes | refutes | narrows | supports | distills | assesses | observes | develops (asserted only)
                 note        TEXT,                    -- optional human annotation
                 asserted_by TEXT NOT NULL DEFAULT 'derived'  -- 'derived' | 'user'
             );
@@ -105,6 +143,10 @@ def init_db(db_path: Path | None = None) -> None:
             -- (NULL template_id) are exempt — NULLs are distinct in SQLite.
             CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_vol_tid
                 ON captures(volume, template_id, COALESCE(page_suffix, ''));
+            -- WA IDs are one namespace across all volumes (loose captures have
+            -- no volume at all), so they get their own uniqueness guarantee.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_wa_id
+                ON captures(template_id) WHERE type='WA';
             -- Dedup key for edges: one row per (source, target, type) so a
             -- reference edge can coexist with a tag_overlap edge on the same
             -- pair, and re-inserts update strength instead of doubling.
@@ -159,15 +201,21 @@ def insert_capture(
     volume: int = 1,
     source: str = "journal",
     page_suffix: str | None = None,
+    wa_reason: str | None = None,
+    wa_detail: str | None = None,
+    claimed_page_id: str | None = None,
+    conflicts_with: int | None = None,
 ) -> int:
     now = datetime.now(timezone.utc).isoformat()
     cur = con.execute(
         """INSERT INTO captures
                (type, template_id, page_suffix, volume, content_json, raw_ocr,
-                summary, confidence, image_path, source, valid_from, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary, confidence, image_path, source, valid_from, created_at,
+                wa_reason, wa_detail, claimed_page_id, conflicts_with)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (type_, template_id or None, page_suffix, volume, json.dumps(content),
-         raw_ocr, summary, confidence, image_path, source, now, now),
+         raw_ocr, summary, confidence, image_path, source, now, now,
+         wa_reason, wa_detail or None, claimed_page_id or None, conflicts_with),
     )
     return cur.lastrowid
 
@@ -233,7 +281,12 @@ def _volume_where(volumes: list[int] | None, alias: str = "c") -> tuple[str, lis
     if not volumes:
         return "", []
     placeholders = ",".join("?" * len(volumes))
-    return f" AND {alias}.volume IN ({placeholders})", list(volumes)
+    # Loose WA captures (napkins, sticky notes) belong to no book, so no
+    # volume filter should hide them.
+    return (
+        f" AND ({alias}.volume IN ({placeholders}) OR {alias}.volume IS NULL)",
+        list(volumes),
+    )
 
 
 # ── Entities ───────────────────────────────────────────────────────────────────
@@ -743,6 +796,19 @@ def get_journal_kpis(con: sqlite3.Connection) -> dict:
     }
 
 
+def _entry_type_where(entry_type: str, wa_reason: str, alias: str = "c") -> tuple[list[str], list]:
+    """WHERE clauses for the entry-type / Wild Art reason filters."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if entry_type:
+        clauses.append(f"{alias}.type = ?")
+        params.append(entry_type.upper())
+    if wa_reason:
+        clauses.append(f"{alias}.wa_reason = ?")
+        params.append(wa_reason.lower())
+    return clauses, params
+
+
 def get_captures_by_tag(
     con: sqlite3.Connection,
     tag_value: str,
@@ -750,33 +816,48 @@ def get_captures_by_tag(
     limit: int = 200,
     role: str = "",
     volumes: list[int] | None = None,
+    entry_type: str = "",
+    wa_reason: str = "",
 ) -> list[dict]:
     """
     Return all captures that carry a tag matching *tag_value* (case-insensitive).
     Optionally filter by *prefix* (the character as written: '#', '@', '?',
     '$', '!', '*', '->') and/or *role* (the canonical meaning: 'topic',
-    'theme', 'priority', 'motif', 'entity', ...). Results sorted by
-    created_at descending. Each capture row includes the roles its matching
-    tag carries, so callers can report prefix-collision splits.
+    'theme', 'priority', 'motif', 'entity', ...), and by *entry_type*
+    ('WA', 'ISO', ...) / *wa_reason*. An empty *tag_value* lists every
+    capture matching the other filters (e.g. the whole Wild Art queue).
+    Results sorted by created_at descending. Each capture row includes the
+    roles its matching tag carries, so callers can report prefix-collision
+    splits.
     """
-    clauses = ["LOWER(t.value) = LOWER(?)"]
-    params: list[Any] = [tag_value]
-
+    clauses: list[str] = []
+    params: list[Any] = []
+    if tag_value:
+        clauses.append("LOWER(t.value) = LOWER(?)")
+        params.append(tag_value)
     if prefix:
         clauses.append("t.prefix = ?")
         params.append(prefix)
     if role:
         clauses.append("t.role = ?")
         params.append(role)
+    type_clauses, type_params = _entry_type_where(entry_type, wa_reason)
+    clauses += type_clauses
+    params += type_params
     clauses.append("c.valid_until IS NULL")
 
     where = " AND ".join(clauses)
     vol_sql, vol_params = _volume_where(volumes)
+    # Tag filters need the join; a pure type/reason listing must also include
+    # captures that carry no tags at all (a napkin sketch often has none).
+    tag_join = bool(tag_value or prefix or role)
     rows = con.execute(
         f"""SELECT DISTINCT c.id, c.type, c.template_id, c.volume, c.summary,
-                   c.confidence, c.created_at, t.role AS matched_role
+                   c.confidence, c.created_at, c.wa_reason, c.wa_detail,
+                   c.claimed_page_id, c.conflicts_with,
+                   {"t.role" if tag_join else "NULL"} AS matched_role
             FROM captures c
-            JOIN tags t ON t.capture_id = c.id
+            {"JOIN tags t ON t.capture_id = c.id" if tag_join else ""}
             WHERE {where}{vol_sql}
             ORDER BY c.created_at DESC
             LIMIT ?""",
@@ -1044,9 +1125,11 @@ def search_fts(
     limit: int = 20,
     volumes: list[int] | None = None,
     include_superseded: bool = False,
+    entry_type: str = "",
+    wa_reason: str = "",
 ) -> list[dict]:
     """
-    Full-text search with optional tag and date filters.
+    Full-text search with optional tag, date, and entry-type filters.
 
     Superseded captures (valid_until set) are excluded by default — queries
     return the current slice; pass include_superseded=True for history.
@@ -1075,6 +1158,9 @@ def search_fts(
         params.append(date_to)
     if not include_superseded:
         extra_clauses.append("c.valid_until IS NULL")
+    type_clauses, type_params = _entry_type_where(entry_type, wa_reason)
+    extra_clauses += type_clauses
+    params.extend(type_params)
 
     extra_where = ("AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
     vol_sql, vol_params = _volume_where(volumes)
@@ -1083,7 +1169,7 @@ def search_fts(
 
     rows = con.execute(
         f"""SELECT c.id, c.type, c.template_id, c.volume, c.summary, c.confidence, c.created_at,
-                   rank
+                   c.wa_reason, rank
             FROM captures_fts
             JOIN captures c ON c.id = captures_fts.rowid
             WHERE captures_fts MATCH ? {extra_where}{vol_sql}
@@ -1637,6 +1723,147 @@ def migrate_v31(db_path: Path | None = None) -> None:
         con.close()
 
 
+def migrate_v37(db_path: Path | None = None) -> bool:
+    """
+    Server 3.7 migration: Wild Art (WA) and isometric (ISO) entry types.
+
+      - captures.type CHECK gains 'ISO' and 'WA'
+      - captures.volume becomes nullable (loose WA captures belong to no book)
+      - new columns, all NULL for existing rows: wa_reason, wa_detail,
+        claimed_page_id, conflicts_with, promoted_from, promoted_at
+      - unique index on WA IDs
+
+    Additive: every existing row is copied with the same id and values, so
+    tags, connections, entities, and the FTS index (all keyed on capture id)
+    are untouched. A CHECK constraint can only change by rebuilding the table,
+    so captures.db is first copied to captures.db.bak-v37.
+
+    Safe to call on every startup — no-op once applied. Returns True only
+    when the migration actually ran.
+    """
+    path = db_path or _DEFAULT_DB
+    if not path.exists():
+        return False
+
+    con = sqlite3.connect(str(path), isolation_level=None, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='captures'"
+        ).fetchone()
+        if row is None:
+            return False  # fresh DB — init_db creates the current schema
+        cols = [r[1] for r in con.execute("PRAGMA table_info(captures)").fetchall()]
+        if "'WA'" in row["sql"] and "wa_reason" in cols:
+            return False  # already migrated
+
+        con.execute("PRAGMA journal_mode=WAL")
+        # Flush WAL so the file copy is a complete backup.
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        shutil.copy2(path, path.with_name(path.name + ".bak-v37"))
+
+        con.execute("PRAGMA foreign_keys=OFF")
+        # Compare against what was already there: an old store may carry a
+        # stray orphan row, which is no reason to refuse to open it.
+        fk_before = len(con.execute("PRAGMA foreign_key_check").fetchall())
+        con.execute("BEGIN")
+        try:
+            con.execute("""
+                CREATE TABLE _captures_v37 (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type        TEXT NOT NULL CHECK(type IN ('RC','SYN','REV','DC','ISO','WA','AIEX','UNKNOWN')),
+                    template_id TEXT,
+                    page_suffix TEXT,
+                    volume      INTEGER DEFAULT 1,
+                    content_json TEXT NOT NULL,
+                    raw_ocr     TEXT NOT NULL,
+                    corrected_ocr TEXT,
+                    summary     TEXT NOT NULL DEFAULT '',
+                    confidence  REAL NOT NULL DEFAULT 0.0,
+                    image_path  TEXT NOT NULL DEFAULT '',
+                    source      TEXT NOT NULL DEFAULT 'journal',
+                    valid_from  TEXT,
+                    valid_until TEXT,
+                    created_at  TEXT NOT NULL,
+                    wa_reason       TEXT,
+                    wa_detail       TEXT,
+                    claimed_page_id TEXT,
+                    conflicts_with  INTEGER REFERENCES captures(id) ON DELETE SET NULL,
+                    promoted_from   TEXT,
+                    promoted_at     TEXT
+                )
+            """)
+            new_cols = [r[1] for r in con.execute("PRAGMA table_info(_captures_v37)").fetchall()]
+            shared = ", ".join(c for c in cols if c in new_cols)
+            con.execute(f"INSERT INTO _captures_v37 ({shared}) SELECT {shared} FROM captures")
+            # Carry the AUTOINCREMENT high-water mark so ids are never reused.
+            seq = con.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name='captures'"
+            ).fetchone()
+
+            for trigger in ("captures_fts_insert", "captures_fts_delete", "captures_fts_update"):
+                con.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            con.execute("DROP TABLE captures")
+            con.execute("ALTER TABLE _captures_v37 RENAME TO captures")
+            if seq is not None:
+                con.execute("DELETE FROM sqlite_sequence WHERE name='_captures_v37'")
+                con.execute(
+                    "UPDATE sqlite_sequence SET seq=MAX(seq, ?) WHERE name='captures'",
+                    (seq["seq"],),
+                )
+                if con.execute(
+                    "SELECT 1 FROM sqlite_sequence WHERE name='captures'"
+                ).fetchone() is None:
+                    con.execute(
+                        "INSERT INTO sqlite_sequence (name, seq) VALUES ('captures', ?)",
+                        (seq["seq"],),
+                    )
+
+            con.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_vol_tid
+                    ON captures(volume, template_id, COALESCE(page_suffix, ''))
+            """)
+            con.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_wa_id
+                    ON captures(template_id) WHERE type='WA'
+            """)
+            # Same FTS triggers as init_db; the FTS index itself is keyed on
+            # the (unchanged) capture ids and stays valid.
+            con.execute("""
+                CREATE TRIGGER captures_fts_insert AFTER INSERT ON captures BEGIN
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_delete AFTER DELETE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER captures_fts_update AFTER UPDATE ON captures BEGIN
+                    INSERT INTO captures_fts(captures_fts, rowid, raw_ocr, summary)
+                    VALUES ('delete', old.id, COALESCE(old.corrected_ocr, old.raw_ocr), old.summary);
+                    INSERT INTO captures_fts(rowid, raw_ocr, summary)
+                    VALUES (new.id, COALESCE(new.corrected_ocr, new.raw_ocr), new.summary);
+                END
+            """)
+            fk_after = len(con.execute("PRAGMA foreign_key_check").fetchall())
+            if fk_after > fk_before:
+                raise sqlite3.IntegrityError(
+                    f"v3.7 migration would add {fk_after - fk_before} dangling reference(s)"
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        return True
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.close()
+
+
 # ── JSONL export / import (versioned interchange format) ──────────────────────
 
 EXPORT_SCHEMA_VERSION = "ksj-export-v1"
@@ -1667,6 +1894,7 @@ def export_jsonl(con: sqlite3.Connection) -> str:
             "confidence": rec["confidence"], "image_path": rec["image_path"],
             "source": rec["source"], "valid_from": rec["valid_from"],
             "valid_until": rec["valid_until"],
+            **{k: rec[k] for k in _WA_COLUMNS if rec.get(k) is not None},
         }, ensure_ascii=False))
 
     for r in con.execute("SELECT * FROM tags ORDER BY id").fetchall():
@@ -1734,21 +1962,26 @@ def import_jsonl(con: sqlite3.Connection, text: str) -> dict:
         kind = rec.get("kind")
         if kind == "capture":
             tid = rec.get("template_id")
-            if tid and check_duplicate(con, tid, volume=rec.get("volume", 1)):
+            # WA IDs are global across volumes (loose captures have none).
+            dup_vol = None if rec["type"] == "WA" else rec.get("volume", 1)
+            if tid and check_duplicate(con, tid, volume=dup_vol):
                 stats["skipped"] += 1
                 continue
             cur = con.execute(
                 """INSERT INTO captures
                        (type, template_id, page_suffix, volume, content_json,
                         raw_ocr, corrected_ocr, summary, confidence, image_path,
-                        source, valid_from, valid_until, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        source, valid_from, valid_until, created_at,
+                        wa_reason, wa_detail, claimed_page_id, promoted_from, promoted_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (rec["type"], tid, rec.get("page_suffix"), rec.get("volume", 1),
                  json.dumps(rec.get("fields", {})), rec.get("raw_ocr", ""),
                  rec.get("corrected_ocr"), rec.get("summary", ""),
                  rec.get("confidence", 0.0), rec.get("image_path", ""),
                  rec.get("source", "journal"), rec.get("valid_from"),
-                 rec.get("valid_until"), rec.get("date") or rec.get("created_at", "")),
+                 rec.get("valid_until"), rec.get("date") or rec.get("created_at", ""),
+                 rec.get("wa_reason"), rec.get("wa_detail"), rec.get("claimed_page_id"),
+                 rec.get("promoted_from"), rec.get("promoted_at")),
             )
             id_map[rec["id"]] = cur.lastrowid
             stats["captures"] += 1
@@ -1784,8 +2017,56 @@ def import_jsonl(con: sqlite3.Connection, text: str) -> dict:
                 )
                 stats["asserted_edges"] += 1
 
+    # conflicts_with points at a capture id, which import remaps.
+    for rec in records:
+        if rec.get("kind") == "capture" and rec.get("conflicts_with") and rec["id"] in id_map:
+            con.execute(
+                "UPDATE captures SET conflicts_with=? WHERE id=?",
+                (id_map.get(rec["conflicts_with"]), id_map[rec["id"]]),
+            )
+
     con.commit()
     return stats
+
+
+def get_next_wa_id(con: sqlite3.Connection) -> str:
+    """
+    Next sequential WA-NNN ID. Numbers are never reused: a promoted entry
+    keeps its old WA ID in promoted_from, so that counts as taken too.
+    """
+    row = con.execute(
+        """SELECT MAX(n) AS max_num FROM (
+               SELECT CAST(SUBSTR(template_id, 4) AS INTEGER) AS n
+               FROM captures WHERE type='WA' AND template_id LIKE 'WA-%'
+               UNION ALL
+               SELECT CAST(SUBSTR(promoted_from, 4) AS INTEGER)
+               FROM captures WHERE promoted_from LIKE 'WA-%')"""
+    ).fetchone()
+    return f"WA-{(row['max_num'] or 0) + 1:03d}"
+
+
+def get_wa_counts(con: sqlite3.Connection, volumes: list[int] | None = None) -> dict:
+    """
+    Unresolved Wild Art entries, split into real failures that need a human
+    look ("needs_attention", with a per-reason breakdown) and loose captures
+    (deliberate off-journal material — no action needed).
+    """
+    vol_sql, vol_params = _volume_where(volumes)
+    by_reason = {
+        (r["wa_reason"] or "other"): r["cnt"]
+        for r in con.execute(
+            f"""SELECT wa_reason, COUNT(*) AS cnt FROM captures c
+                WHERE type='WA'{vol_sql} GROUP BY wa_reason""",
+            vol_params,
+        ).fetchall()
+    }
+    loose = by_reason.get("loose_capture", 0)
+    return {
+        "total": sum(by_reason.values()),
+        "needs_attention": sum(n for r, n in by_reason.items() if r != "loose_capture"),
+        "loose": loose,
+        "by_reason": by_reason,
+    }
 
 
 def get_next_aiex_id(con: sqlite3.Connection) -> str:
@@ -1832,10 +2113,12 @@ def get_stats(con: sqlite3.Connection, volumes: list[int] | None = None) -> dict
     total = con.execute(
         f"SELECT COUNT(*) AS cnt FROM captures c {where}", vol_params
     ).fetchone()["cnt"]
+    wa = get_wa_counts(con, volumes)
 
     return {
         "total_captures": total,
         "by_type": counts,
+        "wild_art": wa,
         "top_tags": [dict(r) for r in top_tags],
         "open_questions": questions,
         "key_insights": insights,

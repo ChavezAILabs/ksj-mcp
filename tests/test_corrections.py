@@ -16,6 +16,7 @@ from ksj_mcp.database import (
     migrate_add_corrected_ocr,
     migrate_v3,
     migrate_v31,
+    migrate_v37,
     search_fts,
     update_capture_correction,
 )
@@ -202,6 +203,7 @@ class TestMigrateAddCorrectedOcr:
         migrate_add_corrected_ocr(db_path)
         assert migrate_v3(db_path) is True
         migrate_v31(db_path)
+        assert migrate_v37(db_path) is True
 
         con = get_connection(db_path)
         assert search_fts(con, "legacy") != []

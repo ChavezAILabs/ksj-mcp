@@ -15,9 +15,9 @@ from datetime import datetime, timedelta, timezone
 
 from .database import get_connections, insert_connection
 
-# Matches @RC-001, @SYN-003, @REV-002, @DC-004 etc.
+# Matches @RC-001, @SYN-003, @REV-002, @DC-004, @ISO-001, @WA-007 etc.
 _REF_PATTERN = re.compile(
-    r'@(RC|SYN|REV|DC)-(\d{3})',
+    r'@(RC|SYN|REV|DC|ISO|WA)-(\d{3})',
     re.IGNORECASE,
 )
 

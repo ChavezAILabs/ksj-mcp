@@ -22,6 +22,13 @@ Overview modes ship in stages, gated only by the data each needs:
            earlier rotating-globe design that rendered the whole dataset
            at once.
 
+Navigation (v3.7): every view change — tab switch, tag/entity filter, jump
+to a capture, graph drill-in — is one entry in a single navigation history,
+mirrored into the URL hash (#timeline/capture/12, #graph/cluster/topic/ml,
+...). The in-app Back button and the browser's Back button both step back
+through views inside the page, and only the browser's leaves it, from the
+first view. Reloading (or opening a copied link) restores the view.
+
 One .html file, all data inlined as JSON, vanilla JS/CSS, no network access,
 no build step, opens in any browser. Everything user-authored is escaped
 client-side; the embedded JSON escapes '</' so page text can never terminate
@@ -30,9 +37,27 @@ the script block.
 
 import json
 import sqlite3
+import sys
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from .database import get_active_volumes, get_current_volume
+
+
+def package_versions() -> dict:
+    """Installed ksj-mcp and key dependency versions (as get_version reports)."""
+    def _v(pkg: str) -> str:
+        try:
+            return _pkg_version(pkg)
+        except PackageNotFoundError:
+            return "unknown"
+
+    return {
+        "ksj_mcp":  _v("ksj-mcp"),
+        "mcp":      _v("mcp"),
+        "pydantic": _v("pydantic"),
+        "python":   sys.version.split()[0],
+    }
 
 
 def collect_view_data(con: sqlite3.Connection) -> dict:
@@ -40,7 +65,8 @@ def collect_view_data(con: sqlite3.Connection) -> dict:
     captures = []
     for r in con.execute(
         """SELECT id, type, template_id, page_suffix, volume, summary, confidence,
-                  content_json, raw_ocr, corrected_ocr, source, valid_until, created_at
+                  content_json, raw_ocr, corrected_ocr, source, valid_until, created_at,
+                  wa_reason, wa_detail, claimed_page_id, conflicts_with, promoted_from
            FROM captures ORDER BY created_at DESC"""
     ).fetchall():
         tags = [
@@ -69,6 +95,12 @@ def collect_view_data(con: sqlite3.Connection) -> dict:
             "superseded": bool(r["valid_until"]),
             "date": (r["created_at"] or "")[:10],
             "tags": tags,
+            # Wild Art: reason + history (null for ordinary captures)
+            "wa_reason": r["wa_reason"],
+            "wa_detail": r["wa_detail"],
+            "claimed_page_id": r["claimed_page_id"],
+            "conflicts_with": r["conflicts_with"],
+            "promoted_from": r["promoted_from"],
         })
 
     entities = []
@@ -106,6 +138,7 @@ def collect_view_data(con: sqlite3.Connection) -> dict:
     vols = get_active_volumes(con)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "versions": package_versions(),  # shown in the footer
         "active_volumes": vols,          # None = all
         "current_volume": get_current_volume(con),
         "captures": captures,
@@ -137,6 +170,7 @@ _TEMPLATE = """<!DOCTYPE html>
   --line: #e2e2de; --accent: #0e7c92; --accent-soft: #e3f2f5; --chip: #eef0ee;
   --type-rc: #b7791f; --type-syn: #7c5cbf; --type-rev: #4a6f96; --type-dc: #96477c;
   --edge-negative: #b23a4a; --edge-positive: #3f8f6b;
+  --type-iso: #2f7f5f; --type-wa: #a0522d;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -144,6 +178,7 @@ _TEMPLATE = """<!DOCTYPE html>
     --line: #253238; --accent: #4cc3d9; --accent-soft: #143540; --chip: #223035;
     --type-rc: #e0ab52; --type-syn: #a68ee6; --type-rev: #82a8cf; --type-dc: #d391b8;
     --edge-negative: #e08795; --edge-positive: #6bc79a;
+    --type-iso: #6cc4a0; --type-wa: #e39a6b;
   }
 }
 :root[data-theme="dark"] {
@@ -151,12 +186,14 @@ _TEMPLATE = """<!DOCTYPE html>
   --line: #253238; --accent: #4cc3d9; --accent-soft: #143540; --chip: #223035;
   --type-rc: #e0ab52; --type-syn: #a68ee6; --type-rev: #82a8cf; --type-dc: #d391b8;
   --edge-negative: #e08795; --edge-positive: #6bc79a;
+  --type-iso: #6cc4a0; --type-wa: #e39a6b;
 }
 :root[data-theme="light"] {
   --bg: #f7f7f5; --card: #ffffff; --ink: #1c2427; --muted: #67737a;
   --line: #e2e2de; --accent: #0e7c92; --accent-soft: #e3f2f5; --chip: #eef0ee;
   --type-rc: #b7791f; --type-syn: #7c5cbf; --type-rev: #4a6f96; --type-dc: #96477c;
   --edge-negative: #b23a4a; --edge-positive: #3f8f6b;
+  --type-iso: #2f7f5f; --type-wa: #a0522d;
 }
 * { box-sizing: border-box; margin: 0; }
 body { background: var(--bg); color: var(--ink);
@@ -165,7 +202,9 @@ body { background: var(--bg); color: var(--ink);
 header h1 { font-size: 1.35rem; letter-spacing: .01em; }
 header .meta { color: var(--muted); font-size: .82rem; margin-top: 4px; }
 .scope { margin-top: 6px; font-size: .82rem; color: var(--accent); }
-.tabs { display: flex; gap: 8px; margin: 18px 0 12px; }
+.tabs { display: flex; gap: 8px; margin: 18px 0 12px; align-items: center; flex-wrap: wrap; }
+.nav-back { margin-right: 4px; }
+.nav-back[hidden] { display: none; }
 .tabs button { border: 1px solid var(--line); background: var(--card); color: var(--ink);
   padding: 7px 18px; border-radius: 999px; cursor: pointer; font-size: .9rem; }
 .tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -192,6 +231,12 @@ header .meta { color: var(--muted); font-size: .82rem; margin-top: 4px; }
   background: var(--chip); color: var(--muted); }
 .badge.src-ai { background: var(--accent-soft); color: var(--accent); }
 .badge.sup { background: #8b2635; color: #fff; }
+.badge.t-WA { background: var(--type-wa); color: #fff; }
+.badge.t-ISO { background: var(--type-iso); color: #fff; }
+.badge.wa-reason { border: 1px solid var(--type-wa); background: none; color: var(--type-wa); }
+.wa-note { margin-top: 6px; font-size: .84rem; color: var(--muted); }
+.wa-note button { border: none; background: none; color: var(--accent); cursor: pointer;
+  font-size: inherit; padding: 0; text-decoration: underline; }
 .date { color: var(--muted); font-size: .8rem; margin-left: auto; }
 .summary { margin-top: 6px; }
 .chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -224,7 +269,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
 .idx-item .kind { color: var(--muted); font-size: .74rem; margin-left: 6px; font-style: italic; }
 .empty { color: var(--muted); font-style: italic; padding: 24px 0; }
 .load-more { text-align: center; padding: 10px 0 24px; }
-footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
+footer { margin-top: 40px; color: var(--muted); font-size: .78rem; line-height: 1.7; }
 
 /* mode 3 — connections */
 .connections { margin-top: 10px; }
@@ -259,10 +304,13 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .dot.t-REV { background: var(--type-rev); }
 .dot.t-DC { background: var(--type-dc); }
 .dot.t-AIEX { background: var(--accent); }
+.dot.t-ISO { background: var(--type-iso); }
+.dot.t-WA { background: var(--type-wa); }
+.dot.t-UNKNOWN { background: var(--muted); }
 #view-graph { position: relative; }
 .graph-caption { color: var(--muted); font-size: .8rem; line-height: 1.5; margin-bottom: 10px; }
 .graph-caption strong { color: var(--ink); }
-.graph-back { margin-bottom: 10px; }
+.ego-note { color: var(--muted); font-size: .84rem; font-style: italic; margin-bottom: 8px; }
 .bubbles { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
 .bubble { border: 1px solid var(--line); background: var(--card); border-radius: 999px;
   cursor: pointer; color: var(--ink); display: flex; flex-direction: column;
@@ -282,6 +330,9 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .ego-node.t-REV circle.body { fill: var(--type-rev); }
 .ego-node.t-DC circle.body { fill: var(--type-dc); }
 .ego-node.t-AIEX circle.body { fill: var(--accent); }
+.ego-node.t-ISO circle.body { fill: var(--type-iso); }
+.ego-node.t-WA circle.body { fill: var(--type-wa); }
+.ego-node.t-UNKNOWN circle.body { fill: var(--muted); }
 .ego-node.cluster circle.body { fill: var(--accent); }
 .ego-node.more { cursor: pointer; }
 .ego-node.more circle.body { fill: var(--chip); stroke: var(--muted); }
@@ -296,6 +347,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
 .ego-edge.e-asserted.e-rel-supersedes { stroke: var(--edge-negative); stroke-dasharray: 6 3; }
 .ego-edge.e-asserted.e-rel-refutes { stroke: var(--edge-negative); stroke-dasharray: 2 3; }
 .ego-edge.e-asserted.e-rel-supports { stroke: var(--edge-positive); }
+.ego-edge.e-asserted.e-rel-develops { stroke: var(--type-wa); }
 .ego-edge.e-entity_overlap { stroke: var(--accent); stroke-opacity: .5; }
 .ego-edge.e-tag_overlap { stroke: var(--muted); stroke-opacity: .4; }
 .ego-panel { text-align: center; margin-top: 12px; }
@@ -309,13 +361,20 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
     <div class="scope" id="scope"></div>
   </header>
   <div class="tabs">
-    <button id="tab-timeline" class="active" onclick="setMode('timeline')">Timeline</button>
-    <button id="tab-index" onclick="setMode('index')">Index</button>
-    <button id="tab-graph" onclick="setMode('graph')">Graph</button>
+    <button id="nav-back" class="btn nav-back" onclick="navBack()" hidden
+      title="Back to the previous view (the browser's Back button works too)">← Back</button>
+    <button id="tab-timeline" class="active" onclick="goMode('timeline')">Timeline</button>
+    <button id="tab-index" onclick="goMode('index')">Index</button>
+    <button id="tab-graph" onclick="goMode('graph')">Graph</button>
   </div>
   <div class="toolbar" id="toolbar">
     <input type="search" id="q" placeholder="Search captures…" oninput="render()">
     <select id="ftype" onchange="render()"><option value="">All types</option></select>
+    <select id="fwa" onchange="render()" style="display:none" title="Wild Art reason">
+      <option value="">All Wild Art</option>
+      <option value="attention">Needs attention</option>
+      <option value="loose_capture">Loose captures</option>
+    </select>
     <select id="fvol" onchange="render()"><option value="">All volumes</option></select>
     <select id="fsrc" onchange="render()">
       <option value="">Journal + AI</option>
@@ -344,14 +403,12 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
         size is how many captures share that tag. Click a bubble, or "view in graph" on any
         capture, to open its local connections: the clicked item sits centered, its direct
         connections (or a cluster's member captures) arranged around it. Click any neighbor
-        to recenter. Use Back to retrace your steps.
-      </div>
-      <div id="graph-back" class="graph-back" style="display:none">
-        <button class="btn" onclick="graphGoBack()">← Back</button>
+        to recenter. Use Back (here or in your browser) to retrace your steps.
       </div>
       <div id="graph-landing"></div>
       <div id="graph-ego" style="display:none">
         <div id="ego-empty" class="empty" style="display:none"></div>
+        <div id="ego-note" class="ego-note" style="display:none"></div>
         <svg id="graph-svg" viewBox="0 0 900 560" preserveAspectRatio="xMidYMid meet"
           aria-label="Connection graph">
           <defs>
@@ -370,7 +427,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: .78rem; }
       </div>
     </div>
   </main>
-  <footer>Generated by ksj-mcp · local file, no network · data as of <span id="gen"></span></footer>
+  <footer id="footer"></footer>
 </div>
 <script id="ksj-data" type="application/json">__DATA__</script>
 <script>
@@ -393,11 +450,10 @@ for (const e of DATA.edges) {
   if (e.target !== e.source) indexEdge(e.target, e);
 }
 const prefersReducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let state = { mode: 'timeline', tag: null, entity: null };
+let state = { mode: 'timeline', tag: null, entity: null, focusCap: null };
 const TIMELINE_PAGE_SIZE = 25;
 state.timelineLimit = TIMELINE_PAGE_SIZE;
 let graphView = { center: null };  // null = landing (cluster/tag overview)
-let graphHistory = [];             // stack of prior centers (null | {type,...})
 let egoShowCount = 0;               // how many neighbors/members to render (reset per center)
 let graphShowSuperseded = false;
 let graphSourceFilter = '';
@@ -405,8 +461,185 @@ let graphSourceFilter = '';
 const esc = s => String(s).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const label = c => c.template_id ? c.template_id + (c.page_suffix || '') : 'UNIDENTIFIED #' + c.id;
+const TYPE_LABELS = { RC: 'Rapid Capture', SYN: 'Synthesis', REV: 'Review', DC: 'Dream Capture',
+  ISO: 'Isometric', WA: 'Wild Art', AIEX: 'AI-Extracted', UNKNOWN: 'Unidentified' };
+const TYPE_ORDER = ['RC', 'SYN', 'REV', 'DC', 'ISO', 'WA', 'AIEX'];
+const WA_REASONS = ['id_conflict', 'unrecognized_template', 'ocr_low_confidence',
+  'validation_error', 'manual', 'other'];
 
-function setMode(m) {
+// ---- navigation: ONE history for every view change ----
+//
+// A "nav" is a plain description of a view: {mode, cap, tag, entity, center}.
+// navigate() pushes it as a browser history entry whose URL hash encodes it
+// (#timeline/capture/12, #graph/cluster/topic/ml, ...) and then applies it.
+// The in-app Back button is just history.back(), so it and the browser's
+// Back button walk the very same stack; popstate re-applies the entry being
+// returned to. Only the browser's Back button can leave the page, and only
+// from the first view (history depth 0). Each entry's state also carries the
+// Timeline filter controls and scroll position as they were when it was
+// left, so Back returns to the view as the reader last saw it.
+
+let navDepth = 0;
+let lastAppliedHash = null;
+const enc = encodeURIComponent;
+
+function navToHash(n) {
+  if (n.mode === 'index') return '#index';
+  if (n.mode === 'graph') {
+    const c = n.center;
+    if (!c) return '#graph';
+    if (c.type === 'capture') return '#graph/capture/' + c.id;
+    if (c.role === 'entity') return '#graph/entity/' + c.value;
+    return '#graph/cluster/' + enc(c.role) + '/' + enc(c.value);
+  }
+  if (n.cap) return '#timeline/capture/' + n.cap;
+  if (n.tag) return '#timeline/tag/' + enc(n.tag.roleName || '') + '/' + enc(n.tag.value);
+  if (n.entity != null) return '#timeline/entity/' + n.entity;
+  return '#timeline';
+}
+
+function clusterDisplay(role, value) {
+  for (const c of DATA.captures) {
+    const t = c.tags.find(t => t.role === role && t.value === value);
+    if (t) return t.prefix + t.display;
+  }
+  return value;
+}
+
+function hashToNav(hash) {
+  let parts;
+  try { parts = (hash || '').replace(/^#\/?/, '').split('/').map(decodeURIComponent); }
+  catch (e) { parts = []; }
+  const mode = ['timeline', 'index', 'graph'].includes(parts[0]) ? parts[0] : 'timeline';
+  const n = { mode, cap: null, tag: null, entity: null, center: null };
+  const num = +parts[2];
+  if (mode === 'timeline') {
+    if (parts[1] === 'capture' && byId.has(num)) n.cap = num;
+    else if (parts[1] === 'tag' && parts.length >= 4) n.tag = { roleName: parts[2], value: parts.slice(3).join('/') };
+    else if (parts[1] === 'entity' && DATA.entities.some(e => e.id === num)) n.entity = num;
+  } else if (mode === 'graph') {
+    if (parts[1] === 'capture' && byId.has(num)) n.center = { type: 'capture', id: num };
+    else if (parts[1] === 'entity') {
+      const e = DATA.entities.find(e => e.id === num);
+      if (e) n.center = { type: 'cluster', role: 'entity', value: e.id, display: e.name };
+    } else if (parts[1] === 'cluster' && parts.length >= 4) {
+      const role = parts[2], value = parts.slice(3).join('/');
+      n.center = { type: 'cluster', role, value, display: clusterDisplay(role, value) };
+    }
+  }
+  return n;
+}
+
+const CONTROL_IDS = ['q', 'ftype', 'fwa', 'fvol', 'fsrc', 'fdatefrom', 'fdateto'];
+function timelineControls() {
+  const v = {};
+  for (const id of CONTROL_IDS) v[id] = document.getElementById(id).value;
+  v.fsup = document.getElementById('fsup').checked;
+  return v;
+}
+function restoreTimelineControls(v) {
+  if (!v) return;
+  for (const id of CONTROL_IDS) if (id in v) document.getElementById(id).value = v[id];
+  document.getElementById('fsup').checked = !!v.fsup;
+}
+function resetTimelineControls() {
+  for (const id of CONTROL_IDS) document.getElementById(id).value = '';
+}
+
+// Record the current view's filters + scroll on its own history entry, so
+// returning to it later restores it as it was left.
+function rememberCurrentView() {
+  try {
+    history.replaceState(Object.assign({}, history.state, {
+      depth: navDepth, controls: timelineControls(), scrollY: window.scrollY,
+    }), '');
+  } catch (e) { /* history unavailable (sandboxed viewer) — nav still works in-page */ }
+}
+
+function navigate(n) {
+  const hash = navToHash(n);
+  if (hash !== location.hash) {
+    rememberCurrentView();
+    navDepth += 1;
+    try {
+      history.pushState({ depth: navDepth }, '', hash);
+    } catch (e) {
+      // Some viewers refuse pushState on file:// — a hash assignment still
+      // makes a history entry; mark it so the hashchange echo is ignored.
+      lastAppliedHash = hash;
+      location.hash = hash;
+    }
+  }
+  applyNav(n, { fresh: true });
+}
+
+function navBack() {
+  if (navDepth > 0) history.back();
+}
+
+function updateBackButton() {
+  document.getElementById('nav-back').hidden = navDepth <= 0;
+}
+
+function sameCenter(a, b) {
+  if (!a || !b) return a === b;
+  return a.type === b.type && a.id === b.id && a.role === b.role && a.value === b.value;
+}
+
+// Apply a nav description to the page. `fresh` = arrived by clicking (so a
+// jump to a capture resets filters and flashes the card); otherwise the view
+// is being restored from history.
+function applyNav(n, opts = {}) {
+  lastAppliedHash = navToHash(n);
+  state.focusCap = n.mode === 'timeline' ? n.cap : null;
+  if (n.mode === 'timeline') {
+    state.tag = n.tag;
+    state.entity = n.entity != null ? (DATA.entities.find(e => e.id === n.entity) || null) : null;
+    if (n.cap) {
+      // Reset the timeline filters so the target is guaranteed visible.
+      if (opts.fresh) resetTimelineControls();
+      const cap = byId.get(n.cap);
+      if (cap && cap.superseded) document.getElementById('fsup').checked = true;
+      // With every filter cleared, the unfiltered Timeline renders only the
+      // first timelineLimit captures (newest-first) — widen the window so
+      // the target's card actually exists in the DOM before scrolling to it.
+      const idx = DATA.captures.findIndex(c => c.id === n.cap);
+      if (idx >= 0) state.timelineLimit = Math.max(state.timelineLimit, idx + 1);
+    }
+  } else if (n.mode === 'graph') {
+    if (!sameCenter(graphView.center, n.center)) egoShowCount = EGO_NEIGHBOR_CAP;
+    graphView = { center: n.center };
+    if (n.center && n.center.type === 'capture') revealInGraph(n.center.id);
+  }
+  showMode(n.mode);
+  updateBackButton();
+  if (n.mode === 'timeline' && n.cap && opts.fresh) flashCapture(n.cap);
+}
+
+function onHistoryMove(e) {
+  const st = (e && e.state) || history.state || {};
+  navDepth = st.depth || 0;
+  const n = hashToNav(location.hash);
+  if (n.mode === 'timeline') restoreTimelineControls(st.controls);
+  applyNav(n, { fresh: !st.controls && !!n.cap });
+  if (typeof st.scrollY === 'number') {
+    requestAnimationFrame(() => window.scrollTo(0, st.scrollY));
+  }
+}
+window.addEventListener('popstate', onHistoryMove);
+// Manual edits to the hash in the address bar (older browsers fire only
+// this); ignored when popstate — or our own navigate() — already applied it.
+window.addEventListener('hashchange', () => {
+  if (location.hash !== lastAppliedHash) onHistoryMove(null);
+});
+
+function goMode(m) {
+  if (m === 'timeline') navigate({ mode: 'timeline', tag: state.tag, entity: state.entity ? state.entity.id : null });
+  else if (m === 'graph') navigate({ mode: 'graph', center: graphView.center });
+  else navigate({ mode: m });
+}
+
+function showMode(m) {
   state.mode = m;
   for (const id of ['timeline', 'index', 'graph']) {
     document.getElementById('tab-' + id).classList.toggle('active', m === id);
@@ -420,38 +653,16 @@ function setMode(m) {
   render();
 }
 
-function setTag(value, roleName) {
-  state.tag = { value, roleName };
-  state.entity = null;
-  setMode('timeline');
-}
-function setEntity(id) {
-  state.entity = DATA.entities.find(e => e.id === id) || null;
-  state.tag = null;
-  setMode('timeline');
-}
-function clearTag() { state.tag = null; state.entity = null; render(); }
+function setTag(value, roleName) { navigate({ mode: 'timeline', tag: { value, roleName } }); }
+function setEntity(id) { navigate({ mode: 'timeline', entity: id }); }
+function clearTag() { navigate({ mode: 'timeline' }); }
 
-// Jump to a capture from anywhere (a connection link, a graph node): reset
-// the timeline filters so the target is guaranteed visible, then scroll to
-// and briefly highlight its card.
-function gotoCapture(id) {
-  document.getElementById('q').value = '';
-  document.getElementById('ftype').value = '';
-  document.getElementById('fvol').value = '';
-  document.getElementById('fsrc').value = '';
-  document.getElementById('fdatefrom').value = '';
-  document.getElementById('fdateto').value = '';
-  const cap = byId.get(id);
-  if (cap && cap.superseded) document.getElementById('fsup').checked = true;
-  state.tag = null; state.entity = null;
-  // With every filter just cleared, the unfiltered Timeline renders only
-  // the first timelineLimit captures (newest-first) — widen the window so
-  // the target's card actually exists in the DOM before scrolling to it,
-  // otherwise this silently lands on the default top-N view instead.
-  const idx = DATA.captures.findIndex(c => c.id === id);
-  if (idx >= 0) state.timelineLimit = Math.max(state.timelineLimit, idx + 1);
-  setMode('timeline');
+// Jump to a capture from anywhere (a connection link, a graph node): the
+// timeline filters are reset so the target is guaranteed visible (applyNav),
+// then its card is scrolled to and briefly highlighted.
+function gotoCapture(id) { navigate({ mode: 'timeline', cap: id }); }
+
+function flashCapture(id) {
   requestAnimationFrame(() => {
     const el = document.getElementById('cap-' + id);
     if (el) {
@@ -462,20 +673,27 @@ function gotoCapture(id) {
   });
 }
 
-// Deep-link entry points into the graph tab (from a capture card, or an
-// Index tag/entity chip) — both start a fresh navigation, so any prior
-// drill-in history is discarded rather than appended to.
-function gotoGraph(id) {
-  graphHistory = [];
-  egoShowCount = EGO_NEIGHBOR_CAP;
-  graphView = { center: { type: 'capture', id } };
-  setMode('graph');
-}
+// Entry points into the graph tab from outside it (a capture card, an Index
+// tag/entity chip) — each is one step in the shared history.
+function gotoGraph(id) { navigate({ mode: 'graph', center: { type: 'capture', id } }); }
 function gotoGraphCluster(role, value, display) {
-  graphHistory = [];
-  egoShowCount = EGO_NEIGHBOR_CAP;
-  graphView = { center: { type: 'cluster', role, value, display } };
-  setMode('graph');
+  navigate({ mode: 'graph', center: { type: 'cluster', role, value, display } });
+}
+
+// A capture you ask to see in the graph must not be hidden by the graph's
+// own filters — that used to land on a false "not visible" empty state
+// (e.g. "view in graph" on a superseded card).
+function revealInGraph(id) {
+  const cap = byId.get(id);
+  if (!cap) return;
+  if (cap.superseded && !graphShowSuperseded) {
+    graphShowSuperseded = true;
+    document.getElementById('gshowsup').checked = true;
+  }
+  if (graphSourceFilter && cap.source !== graphSourceFilter) {
+    graphSourceFilter = '';
+    document.getElementById('gsource').value = '';
+  }
 }
 
 // True once any search/filter control is off its default — at that point the
@@ -484,6 +702,7 @@ function gotoGraphCluster(role, value, display) {
 function hasActiveFilters() {
   return !!document.getElementById('q').value.trim()
     || !!document.getElementById('ftype').value
+    || !!document.getElementById('fwa').value
     || !!document.getElementById('fvol').value
     || !!document.getElementById('fsrc').value
     || !!document.getElementById('fdatefrom').value
@@ -494,6 +713,7 @@ function hasActiveFilters() {
 function filtered() {
   const q = document.getElementById('q').value.trim().toLowerCase();
   const ftype = document.getElementById('ftype').value;
+  const fwa = ftype === 'WA' ? document.getElementById('fwa').value : '';
   const fvol = document.getElementById('fvol').value;
   const fsrc = document.getElementById('fsrc').value;
   const fsup = document.getElementById('fsup').checked;
@@ -502,7 +722,9 @@ function filtered() {
   return DATA.captures.filter(c => {
     if (!fsup && c.superseded) return false;
     if (ftype && c.type !== ftype) return false;
-    if (fvol && String(c.volume) !== fvol) return false;
+    if (fwa === 'attention' && c.wa_reason === 'loose_capture') return false;
+    if (fwa && fwa !== 'attention' && c.wa_reason !== fwa) return false;
+    if (fvol === 'none' ? c.volume != null : (fvol && String(c.volume) !== fvol)) return false;
     if (fsrc && c.source !== fsrc) return false;
     if (dfrom && c.date < dfrom) return false;
     if (dto && c.date > dto) return false;
@@ -533,7 +755,7 @@ const RELATION_PASSIVE = {
   supersedes: 'superseded by', refutes: 'refuted by',
   narrows: 'narrowed by', supports: 'supported by',
   distills: 'distilled by', assesses: 'assessed by',
-  observes: 'observed by',
+  observes: 'observed by', develops: 'developed by',
 };
 
 function connectionRows(capId) {
@@ -587,10 +809,22 @@ function connectionsSectionHtml(capId) {
   return html;
 }
 
+function waNoteHtml(c) {
+  if (c.type !== 'WA') return '';
+  const bits = [];
+  if (c.claimed_page_id) bits.push(`read as ${esc(c.claimed_page_id)}`);
+  const other = c.conflicts_with != null ? byId.get(c.conflicts_with) : null;
+  if (other) bits.push(`conflicts with <button onclick="gotoCapture(${other.id})">${esc(label(other))} →</button>`);
+  if (c.wa_detail) bits.push(esc(c.wa_detail));
+  return bits.length ? `<div class="wa-note">Wild Art — ${bits.join(' · ')}</div>` : '';
+}
+
 function captureCard(c) {
   const badges = [
-    `<span class="badge">${esc(c.type)}</span>`,
-    `<span class="badge">vol ${c.volume}</span>`,
+    `<span class="badge t-${esc(c.type)}" title="${esc(TYPE_LABELS[c.type] || c.type)}">${esc(c.type)}</span>`,
+    c.type === 'WA' && c.wa_reason ? `<span class="badge wa-reason">${esc(c.wa_reason.replace(/_/g, ' '))}</span>` : '',
+    `<span class="badge">${c.volume == null ? 'no volume' : 'vol ' + c.volume}</span>`,
+    c.promoted_from ? `<span class="badge" title="Promoted from Wild Art">was ${esc(c.promoted_from)}</span>` : '',
     c.source === 'ai_extract' ? '<span class="badge src-ai">AI-extracted</span>' : '',
     c.superseded ? '<span class="badge sup">superseded</span>' : '',
   ].join(' ');
@@ -605,6 +839,7 @@ function captureCard(c) {
     <div class="top"><span class="tid">${esc(label(c))}</span>${badges}
       <span class="date">${esc(c.date)}</span></div>
     <div class="summary">${esc(c.summary) || '<i>(no summary)</i>'}</div>
+    ${waNoteHtml(c)}
     <div class="chips">${chips}
       <button class="chip chip-graph" onclick="gotoGraph(${c.id})" title="View connections graph">view in graph →</button>
     </div>
@@ -625,6 +860,8 @@ function loadMoreTimeline() {
 }
 
 function renderTimeline(el) {
+  document.getElementById('fwa').style.display =
+    document.getElementById('ftype').value === 'WA' ? '' : 'none';
   const caps = filtered();
   const at = document.getElementById('activetag');
   if (state.tag) {
@@ -709,7 +946,7 @@ function render() {
 // logic as renderIndex), sized by capture count. Drill-in view: a single
 // fixed radial layout — the clicked capture or cluster sits centered,
 // direct connections (or, for a cluster, member captures) arranged evenly
-// around it. Clicking a neighbor recenters; Back retraces graphHistory.
+// around it. Clicking a neighbor recenters; Back retraces the shared nav history.
 // No physics, no rotation — every render is a plain, static SVG built from
 // the already-embedded DATA.edges/DATA.captures (this is a static export,
 // there's no live DB to query further).
@@ -726,7 +963,6 @@ function render() {
 const GRAPH_W = 900, GRAPH_H = 560, GRAPH_CX = GRAPH_W / 2, GRAPH_CY = GRAPH_H / 2;
 const EGO_RING_R = 200, EGO_CENTER_R = 44, EGO_NEIGHBOR_R = 30;
 const EGO_NEIGHBOR_CAP = 8;
-const TYPE_LABELS = { RC: 'Rapid Capture', SYN: 'Synthesis', REV: 'Review', DC: 'Dream Capture', AIEX: 'AI-Extracted' };
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -838,7 +1074,6 @@ function renderGraphLanding(el) {
 // ---- drill-in (ego) view ----
 
 function renderGraphView() {
-  document.getElementById('graph-back').style.display = graphHistory.length ? '' : 'none';
   const landing = document.getElementById('graph-landing');
   const ego = document.getElementById('graph-ego');
   if (!graphView.center) {
@@ -852,21 +1087,9 @@ function renderGraphView() {
   renderEgoGraph(graphView.center);
 }
 
-function graphGoBack() {
-  egoShowCount = EGO_NEIGHBOR_CAP;
-  graphView = { center: graphHistory.length ? graphHistory.pop() : null };
-  renderGraphView();
-}
-
-function egoRecenter(center) {
-  graphHistory.push(graphView.center);
-  egoShowCount = EGO_NEIGHBOR_CAP;
-  graphView = { center };
-  renderGraphView();
-}
-// Landing-bubble clicks stay inside the graph tab's own navigation (push
-// history, so Back returns to the landing view) — unlike gotoGraphCluster,
-// which is for entry points OUTSIDE the graph tab and always starts fresh.
+// Recentering is a navigation step like any other: Back returns to the
+// previous center, and from the first drill-in to the landing view.
+function egoRecenter(center) { navigate({ mode: 'graph', center }); }
 function egoRecenterCluster(role, value, display) {
   egoRecenter({ type: 'cluster', role, value, display });
 }
@@ -945,6 +1168,8 @@ function buildEgoMoreNode(count, x, y) {
 
 function renderEgoGraph(center) {
   document.getElementById('ego-empty').style.display = 'none';
+  const note = document.getElementById('ego-note');
+  note.style.display = 'none';
   let centerDisplay, centerCls, itemsAll;
 
   if (center.type === 'capture') {
@@ -953,6 +1178,15 @@ function renderEgoGraph(center) {
     centerDisplay = label(centerCap);
     centerCls = `t-${centerCap.type}`;
     itemsAll = egoNeighbors(center.id).map(x => ({ cap: x.other, edge: x.e }));
+    if (!itemsAll.length) {
+      // Distinguish "no connections" from "connections hidden by the graph
+      // filters" — the latter must never read as an empty capture.
+      const total = edgesFor(center.id).filter(e => byId.has(otherEnd(e, center.id))).length;
+      note.textContent = total
+        ? `${total} connection(s) hidden by the graph filters above (superseded / source).`
+        : 'No connections yet.';
+      note.style.display = '';
+    }
   } else {
     centerDisplay = center.display;
     centerCls = 'cluster';
@@ -1001,18 +1235,43 @@ function renderEgoGraph(center) {
   const caps = DATA.captures;
   document.getElementById('meta').textContent =
     `${caps.length} capture(s) · ${DATA.entities.length} entit(ies) · current writing volume: ${DATA.current_volume}`;
-  document.getElementById('gen').textContent = DATA.generated_at.slice(0, 16).replace('T', ' ');
+  const v = DATA.versions || {};
+  const byType = {};
+  for (const c of caps) byType[c.type] = (byType[c.type] || 0) + 1;
+  const typeCounts = [...TYPE_ORDER, ...Object.keys(byType).filter(t => !TYPE_ORDER.includes(t))]
+    .filter(t => byType[t]).map(t => `${t} ${byType[t]}`).join(' · ');
+  document.getElementById('footer').innerHTML =
+    `Generated by ksj-mcp ${esc(v.ksj_mcp || '?')} (mcp ${esc(v.mcp || '?')} · pydantic `
+    + `${esc(v.pydantic || '?')} · Python ${esc(v.python || '?')}) · exported `
+    + `${esc(DATA.generated_at.slice(0, 16).replace('T', ' '))} UTC<br>`
+    + `${caps.length} capture(s) (${esc(typeCounts || 'none')}) · ${DATA.entities.length} entit(ies) · `
+    + `${DATA.edges.length} connection(s) · local file, no network`;
   const scope = document.getElementById('scope');
   scope.textContent = DATA.active_volumes === null
     ? ''
     : `Server read scope is volume(s) ${DATA.active_volumes.join(', ')} — this file contains ALL volumes; use the volume filter below.`;
-  const types = [...new Set(caps.map(c => c.type))].sort();
+  // WA and ISO are always offered, even before the first one exists.
+  const present = new Set(caps.map(c => c.type));
+  const types = [...TYPE_ORDER, ...[...present].filter(t => !TYPE_ORDER.includes(t)).sort()];
   const ftype = document.getElementById('ftype');
-  for (const t of types) ftype.add(new Option(t, t));
-  const vols = [...new Set(caps.map(c => c.volume))].sort((a, b) => a - b);
+  for (const t of types) ftype.add(new Option(`${t} — ${TYPE_LABELS[t] || t}`, t));
+  const fwa = document.getElementById('fwa');
+  for (const r of WA_REASONS) fwa.add(new Option(r.replace(/_/g, ' '), r));
+  const vols = [...new Set(caps.map(c => c.volume))].filter(v => v != null).sort((a, b) => a - b);
   const fvol = document.getElementById('fvol');
-  for (const v of vols) fvol.add(new Option('volume ' + v, String(v)));
-  render();
+  for (const vol of vols) fvol.add(new Option('volume ' + vol, String(vol)));
+  if (caps.some(c => c.volume == null)) fvol.add(new Option('no volume (loose)', 'none'));
+
+  // Open on the view named in the URL hash (reload / shared link), else
+  // Timeline. A reload keeps its history entry's state, depth included.
+  const st = history.state || {};
+  navDepth = st.depth || 0;
+  const n = hashToNav(location.hash);
+  if (n.mode === 'timeline') restoreTimelineControls(st.controls);
+  try {
+    history.replaceState(Object.assign({}, st, { depth: navDepth }), '', navToHash(n));
+  } catch (e) { /* history unavailable — the view still renders */ }
+  applyNav(n, { fresh: !st.controls && !!n.cap });
 })();
 </script>
 </body>

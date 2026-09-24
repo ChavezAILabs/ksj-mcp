@@ -1,8 +1,9 @@
 """
 KSJ MCP Server — MCPServer entry point.
 
-36 tools:
+37 tools:
   get_version        — Running ksj-mcp/mcp/pydantic/python versions (confirm an install/upgrade)
+  promote_capture    — File a Wild Art (WA) entry under its proper type (RC/SYN/REV/DC/ISO)
   export_html        — Self-contained HTML view: timeline, index, connections, graph
   assert_connection  — Assert supersedes/refutes/narrows/supports between captures
   find_path          — Shortest connection chain between two captures
@@ -10,16 +11,16 @@ KSJ MCP Server — MCPServer entry point.
   lint               — Health check: orphans, stale claims, contradictions, old questions
   export_backup      — Full base to versioned JSONL (ksj-export-v1)
   import_backup      — Restore a JSONL backup (additive, non-destructive)
-  manual_capture     — Store a capture from assistant-transcribed text (primary path)
-  upload_capture     — OCR a journal photo locally (Tesseract) and store it
+  manual_capture     — Store a capture from assistant-transcribed text (primary path; never rejects)
+  upload_capture     — OCR a journal photo locally (Tesseract) and store it (never rejects)
   correct_ocr        — Replace a stored capture's transcription; re-parse and reconnect
-  identify_capture   — Assign/fix the template ID of a stored (or unidentified) capture
+  identify_capture   — Assign/fix the template ID of a stored capture (WA entries → promote_capture)
   set_volume         — Configure which journal volume is written to / searched
   assert_entity      — Manually link a named entity (person, place, symbol) to a capture
   rebuild_connections— Re-derive the whole connection graph from current tags and text
   bulk_upload        — Process a whole folder of photos at once
-  search_captures    — Full-text search with optional filters
-  list_by_tag        — Browse all captures with a given tag or prefix
+  search_captures    — Full-text search with optional filters (incl. entry type / WA reason)
+  list_by_tag        — Browse captures by tag, prefix, entry type, or WA reason
   find_connections   — Tag overlap + @-reference connections for a capture
   get_stats          — Summary counts, top tags, open questions
   export_captures    — Dump captures as Markdown or JSON
@@ -43,7 +44,10 @@ KSJ MCP Server — MCPServer entry point.
 import json
 import os
 import shutil
+import sqlite3
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
@@ -65,6 +69,11 @@ from .database import (
     link_capture_entity,
     migrate_v3,
     migrate_v31,
+    migrate_v37,
+    PAGE_TYPES,
+    WA_REASONS,
+    get_next_wa_id,
+    get_wa_counts,
     set_setting,
     get_dc_pattern_data,
     get_dream_cooccurrence,
@@ -117,7 +126,7 @@ You are an AI assistant integrated with the Knowledge Synthesis Journal
 review, and understand their journal entries through photo uploads and
 direct queries.
 
-## The 4 Templates
+## The Templates
 
 **Rapid Capture (RC-001 to RC-040)**
 Fast note-taking with schema tags. Left page: dot grid.
@@ -132,6 +141,23 @@ Needs Work → Solid → Mastered. Left page: quad ruled grid.
 **Dream Capture (DC-001 to DC-008)**
 Morning dream recording. Captures narrative, characters, symbols,
 emotions, sensory details, and waking life context.
+
+**Isometric (ISO-001, ISO-002, ...)**
+3-D isometric grid pages (not dot grid) — mostly drawings. Store them with
+manual_capture(template_id="ISO-NNN"), transcribing the subject line,
+labels, and notes around the drawing.
+
+**Wild Art (WA-001, WA-002, ...)**
+Nothing uploaded is ever rejected. A page that can't be filed normally —
+no readable template ID, an ID too doubtful to trust, or a page ID that is
+already taken — is stored as a Wild Art entry with the reason recorded
+(wa_reason) and nothing existing is overwritten. WA is also the intake for
+off-journal material: a napkin sketch, sticky note, whiteboard photo — use
+wa_reason="loose_capture" (no volume or page ID needed). Review the queue
+with list_by_tag(entry_type="WA"); file an entry with promote_capture()
+(it refuses an occupied page ID — ask the user which ID or volume is
+right, never guess); link a loose capture to the journal entry that
+develops it with assert_connection(entry, scribble, "develops").
 
 **AI Insight Extraction (AIEX-001, AIEX-002, ...)**
 AI-assisted extraction of high-value insights from research sessions.
@@ -164,9 +190,11 @@ the prefix character.
 ## Volumes
 Each physical journal is a volume; volume 2 continues volume 1's knowledge
 base and cross-volume connections are expected. When a user starts a new
-journal, call set_volume(current_volume=N) once. If an upload reports a
-template-ID collision, ask whether this is a new journal (new volume) or a
-re-capture of the same page (force=True).
+journal, call set_volume(current_volume=N) once. If an upload lands in
+Wild Art with reason id_conflict, ask whether this is a page from a new
+journal (promote_capture with volume=N), a page whose ID was misread
+(promote_capture with the right ID), or a cleaner re-capture of the same
+page (re-upload with force=True replaces the original).
 
 ## What You Can Do
 - Search and retrieve entries by tag, template, or concept
@@ -207,31 +235,105 @@ def _data_dir() -> Path:
 _DB_PATH     = _data_dir() / "captures.db"
 _IMAGES_DIR  = _data_dir() / "images"
 
-# Migrations run BEFORE init_db: on an old database they rebuild it to the
-# current schema; on a fresh install they are no-ops and init_db creates the
-# current schema directly. (init_db's CREATE INDEX statements assume current
-# columns, so it must not run first against an old schema.)
-migrate_add_aiex(_DB_PATH)
-migrate_fix_fk_references(_DB_PATH)
-migrate_add_corrected_ocr(_DB_PATH)
-_v3_migrated = migrate_v3(_DB_PATH)
-migrate_v31(_DB_PATH)
-init_db(_DB_PATH)
-_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+# ── Store startup (off the handshake path) ────────────────────────────────────
+#
+# Nothing touches the capture store at import time. Opening, migrating, and
+# (after a v3 migration) rebuilding the graph used to run before the server
+# answered `initialize`, so handshake time grew with the store — and when
+# another process held the database (a second ksj instance mid-bulk_upload,
+# say) the server blocked on SQLite's busy timeout and then crashed before
+# ever replying. main() now starts this work in a background thread the
+# moment the process starts; `initialize` and `tools/list` never wait on it,
+# and every tool reaches the store through _db(), which waits for it.
 
-if _v3_migrated:
-    # §1.13 rule 8: edge semantics changed (IDF strengths, typed dedup), so
-    # the graph is re-derived from current tags and text after migration.
-    _con = get_connection(_DB_PATH)
+_store_ready = threading.Event()
+_store_lock  = threading.Lock()
+_store_thread: threading.Thread | None = None
+_store_error: BaseException | None = None
+
+_STORE_WAIT_SECONDS = 300      # a first-run v3 migration can take minutes
+_STORE_LOCK_RETRY_SECONDS = 120
+
+
+def _init_store() -> None:
+    """Migrate and open the capture store. Idempotent; runs once per process."""
+    # Migrations run BEFORE init_db: on an old database they rebuild it to the
+    # current schema; on a fresh install they are no-ops and init_db creates the
+    # current schema directly. (init_db's CREATE INDEX statements assume current
+    # columns, so it must not run first against an old schema.)
+    migrate_add_aiex(_DB_PATH)
+    migrate_fix_fk_references(_DB_PATH)
+    migrate_add_corrected_ocr(_DB_PATH)
+    v3_migrated = migrate_v3(_DB_PATH)
+    migrate_v31(_DB_PATH)
+    migrate_v37(_DB_PATH)
+    init_db(_DB_PATH)
+    # (images/ is created on first use, by _store_capture)
+
+    if v3_migrated:
+        # §1.13 rule 8: edge semantics changed (IDF strengths, typed dedup), so
+        # the graph is re-derived from current tags and text after migration.
+        con = get_connection(_DB_PATH)
+        try:
+            db_rebuild_connections(con)
+        finally:
+            con.close()
+
+
+def _store_worker() -> None:
+    global _store_error
+    deadline = time.monotonic() + _STORE_LOCK_RETRY_SECONDS
+    delay = 0.5
     try:
-        db_rebuild_connections(_con)
+        while True:
+            try:
+                _init_store()
+                return
+            except sqlite3.OperationalError as e:
+                # Another process holds the database (commonly a second ksj
+                # instance mid-write). Wait it out rather than failing.
+                if "locked" not in str(e).lower() or time.monotonic() > deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 5.0)
+    except BaseException as e:  # surfaced to the first tool call, not lost
+        _store_error = e
+        print(f"ksj-mcp: capture store failed to open: {e!r}", file=sys.stderr)
     finally:
-        _con.close()
+        _store_ready.set()
+
+
+def _start_store_init() -> None:
+    """Start opening the store in the background (no-op if already started)."""
+    global _store_thread
+    with _store_lock:
+        if _store_thread is None:
+            _store_thread = threading.Thread(
+                target=_store_worker, name="ksj-store-init", daemon=True
+            )
+            _store_thread.start()
+
+
+def _ensure_store() -> None:
+    """Block until the store is open. Tools wait here rather than fail."""
+    _start_store_init()
+    if not _store_ready.wait(_STORE_WAIT_SECONDS):
+        raise RuntimeError(
+            f"The KSJ capture store at {_DB_PATH} is still opening after "
+            f"{_STORE_WAIT_SECONDS}s (a large one-time migration may be running). "
+            f"Try again shortly."
+        )
+    if _store_error is not None:
+        raise RuntimeError(
+            f"The KSJ capture store at {_DB_PATH} could not be opened: {_store_error}"
+        ) from _store_error
+
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 
 
 def _db():
+    _ensure_store()
     return get_connection(_DB_PATH)
 
 
@@ -251,6 +353,17 @@ def _cloud_ocr_notice() -> str:
     )
 
 
+def _vol_label(volume, paren: bool = False) -> str:
+    """' vol N' for volumes other than 1, ' no volume' for loose captures."""
+    if volume is None:
+        text = "no volume"
+    elif volume != 1:
+        text = f"vol {volume}"
+    else:
+        return ""
+    return f" ({text})" if paren else f" {text}"
+
+
 def _read_scope(con) -> tuple[list[int] | None, str]:
     """
     Active read scope: (volumes, note). volumes is None when all volumes are
@@ -267,44 +380,225 @@ def _read_scope(con) -> tuple[list[int] | None, str]:
     )
 
 
-# ── Shared upload helper ──────────────────────────────────────────────────────
+# ── Shared upload helpers ─────────────────────────────────────────────────────
+#
+# Accept-by-default (v3.7): nothing uploaded is ever dropped. A page that
+# fails classification, validation, or ID assignment is stored as a Wild Art
+# (WA) entry — text, tags, image and all — with the reason recorded, instead
+# of being rejected. It can be promoted to its proper type after review.
 
-def _process_image(image_path: str, force: bool = False, volume: int = 0) -> dict:
+# An ID read only loosely (OCR-confusion normalized) from an OCR pass below
+# this confidence is too doubtful to file under; the page goes to WA.
+_LOW_CONF_ID_THRESHOLD = 0.6
+
+_WA_REASON_TEXT = {
+    "id_conflict":           "page ID already taken",
+    "unrecognized_template": "no template ID could be read",
+    "ocr_low_confidence":    "template ID read only loosely from low-confidence OCR",
+    "validation_error":      "failed validation",
+    "loose_capture":         "loose capture (off-journal)",
+    "manual":                "filed as Wild Art by hand",
+    "other":                 "other",
+}
+
+
+def _normalize_wa_reason(reason: str, detail: str) -> tuple[str, str]:
+    """
+    Map a caller-supplied WA reason onto WA_REASONS. An unknown reason is
+    filed as 'other' with the given text kept in the detail — never rejected.
+    """
+    r = reason.strip().lower().replace("-", "_").replace(" ", "_")
+    if not r:
+        return "", detail
+    if r in WA_REASONS:
+        return r, detail
+    return "other", "; ".join(x for x in (f"reason given: {reason.strip()}", detail) if x)
+
+
+def _claimed_type(claimed_page_id: str | None) -> str:
+    """Template type of a claimed page ID, or 'WA' if there is none."""
+    if claimed_page_id:
+        t = claimed_page_id.split("-", 1)[0].upper()
+        if t in PAGE_TYPES:
+            return t
+    return "WA"
+
+
+def _strongest_connection(con, connections: list[dict]) -> dict | None:
+    """The strongest / most surprising connection, for the upload highlight."""
+    if not connections:
+        return None
+
+    def _age_days(cap) -> int:
+        try:
+            dt = datetime.fromisoformat(cap["created_at"])
+            return (datetime.now(timezone.utc) - dt).days
+        except Exception:
+            return 0
+
+    # Prefer the highest strength; break ties by age (oldest = most surprising)
+    def _score(c):
+        other_cap = get_capture(con, c["connected_id"])
+        return (c["strength"], _age_days(other_cap) if other_cap else 0)
+
+    best = max(connections, key=_score)
+    other = get_capture(con, best["connected_id"])
+    if not other:
+        return None
+    return {
+        "template_id": other["template_id"],
+        "summary":     other["summary"],
+        "strength":    best["strength"],
+        "age_days":    _age_days(other),
+        "shared_tags": best.get("shared_tags", []),
+        "method":      best["method"],
+    }
+
+
+def _store_capture(
+    con,
+    *,
+    template_type: str,
+    template_id: str | None,
+    page_suffix: str | None,
+    text: str,
+    confidence: float,
+    image_path: str,
+    volume: int | None,
+    wa_reason: str = "",
+    wa_detail: str = "",
+    claimed_page_id: str | None = None,
+    conflicts_with: int | None = None,
+    image_src: Path | None = None,
+) -> dict:
+    """
+    Parse, store, tag, and connect one capture. With *wa_reason* set, the
+    capture is filed as Wild Art: it gets the next WA-NNN ID and is parsed
+    with the type it claimed to be (so promotion later loses nothing).
+    When *image_src* is given, the photo is copied into the knowledge base.
+    """
+    parse_type = _claimed_type(claimed_page_id) if wa_reason else template_type
+    parsed = parse_template(parse_type, text)
+
+    for attempt in range(5):
+        if wa_reason:
+            ttype, tid, suffix = "WA", get_next_wa_id(con), None
+        else:
+            ttype, tid, suffix = template_type, template_id, page_suffix
+
+        stored_image = image_path
+        if image_src is not None and attempt == 0:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            dest = _IMAGES_DIR / f"{tid or 'unidentified'}_{ts}{image_src.suffix.lower()}"
+            try:
+                _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(image_src, dest)
+                image_path = stored_image = str(dest)
+            except Exception:
+                pass  # fall back to the original path
+
+        try:
+            capture_id = insert_capture(
+                con,
+                type_=ttype,
+                template_id=tid,
+                content=parsed["fields"],
+                raw_ocr=text,
+                summary=parsed["summary"],
+                confidence=confidence,
+                image_path=stored_image,
+                volume=volume,
+                page_suffix=suffix,
+                wa_reason=wa_reason or None,
+                wa_detail=wa_detail or None,
+                claimed_page_id=claimed_page_id,
+                conflicts_with=conflicts_with,
+            )
+            break
+        except sqlite3.IntegrityError:
+            # Another process took the same WA number between allocation and
+            # insert — allocate again. (Typed IDs were checked up front.)
+            con.rollback()
+            if not wa_reason or attempt == 4:
+                raise
+    insert_tags(con, capture_id, parsed["tags"])
+    con.commit()
+
+    connections = build_connections(con, capture_id)
+    return {
+        "capture_id":   capture_id,
+        "template_id":  tid or "",
+        "type":         ttype,
+        "page_suffix":  suffix,
+        "summary":      parsed["summary"],
+        "tags":         parsed["tags"],
+        "stored_image": stored_image,
+        "connections":  connections,
+        # §2.2a: surface prior uncited findings at the moment of writing
+        "_unapplied":   find_unapplied(con, capture_id),
+        "highlight":    _strongest_connection(con, connections),
+    }
+
+
+def _duplicate_detail(tid: str, existing: dict) -> str:
+    return (
+        f"{tid} already exists in volume {existing['volume']} "
+        f"(#{existing['id']}, stored {existing['created_at'][:10]})"
+    )
+
+
+def _process_image(
+    image_path: str,
+    force: bool = False,
+    volume: int = 0,
+    wa_reason: str = "",
+    wa_detail: str = "",
+) -> dict:
     """
     Core upload pipeline: OCR → identify (tiered) → volume-aware duplicate
     check → parse → store → copy image → detect connections → highlight.
 
-    OCR always runs and the page is ALWAYS stored — identification failure
-    stores the page as UNIDENTIFIED rather than discarding the photo, since
-    the photo (that page, in that light, at that moment) is the expensive
-    irreversible part and the six-character ID is the cheap recoverable one.
+    The page is ALWAYS stored once its image can be read. Anything that
+    would once have rejected it — no readable template ID, an ID read too
+    loosely to trust, a page ID already taken, an OCR failure on this image —
+    stores it as Wild Art (WA) with the reason instead, since the photo (that
+    page, in that light, at that moment) is the expensive irreversible part
+    and the page ID is the cheap recoverable one. Only a missing file or a
+    missing/misconfigured OCR engine (nothing about this page) returns an
+    error without storing.
 
     Returns a result dict:
       {
         "ok":           bool,
         "error":        str | None,
         "capture_id":   int | None,
-        "template_id":  str,
+        "template_id":  str,           # typed ID, or the WA-NNN ID
+        "type":         str,
         "summary":      str,
         "tags":         list,
         "confidence":   float,
         "connections":  list,
         "highlight":    dict | None,   # strongest / most surprising connection
-        "duplicate":    dict | None,   # existing capture if dupe was found
+        "duplicate":    dict | None,   # capture already holding the page ID
         "stored_image": str,           # path inside data/images/
         "volume":       int | None,
-        "unidentified": bool,
+        "wa_reason":    str,           # "" unless filed as Wild Art
+        "wa_detail":    str,
+        "claimed_page_id": str | None,
       }
     """
     result = {
         "ok": False, "error": None, "capture_id": None,
-        "template_id": "", "summary": "", "tags": [],
+        "template_id": "", "type": "", "summary": "", "tags": [],
         "confidence": 0.0, "connections": [], "highlight": None,
         "duplicate": None, "stored_image": "",
-        "volume": None, "unidentified": False, "_id_note": "",
+        "volume": None, "wa_reason": "", "wa_detail": "",
+        "claimed_page_id": None, "_id_note": "",
     }
+    wa_reason, wa_detail = _normalize_wa_reason(wa_reason, wa_detail)
 
     # OCR
+    ocr_failure = ""
     try:
         ocr_result = extract_text(image_path)
     except OcrNotAvailableError as e:
@@ -317,8 +611,13 @@ def _process_image(image_path: str, force: bool = False, volume: int = 0) -> dic
         result["error"] = f"File not found: {image_path}"
         return result
     except Exception as e:
-        result["error"] = f"Unexpected OCR error: {e}"
-        return result
+        # Something about THIS image defeated OCR. Keep the photo anyway.
+        ocr_failure = f"OCR failed on this image: {e}"
+        ocr_result = {
+            "raw_text": "", "template_type": "UNKNOWN", "template_id": "",
+            "page_suffix": None, "volume": None, "id_confidence": 0.0,
+            "confidence": 0.0,
+        }
 
     raw_text      = ocr_result["raw_text"]
     template_type = ocr_result["template_type"]
@@ -330,155 +629,107 @@ def _process_image(image_path: str, force: bool = False, volume: int = 0) -> dic
 
     # Low-confidence warning (non-fatal)
     low_conf_warning = ""
-    if confidence < 0.6:
+    if confidence < 0.6 and not ocr_failure:
         low_conf_warning = (
             f"\n  ⚠ Low OCR confidence ({confidence:.0%}) — consider retaking with better lighting "
             "or holding the camera more parallel to the page."
         )
-
-    result["template_id"] = template_id or ""
-    result["confidence"]  = confidence
+    result["confidence"] = confidence
 
     with _db() as con:
         # Volume resolution (§1.4): written on the page > per-upload
         # parameter > stored default.
         vol = page_volume or volume or get_current_volume(con)
-        result["volume"] = vol
+        conflicts_with = None
 
-        if template_type == "UNKNOWN":
-            # §1.2: identification failed, but the page is stored anyway.
-            result["unidentified"] = True
+        if wa_reason:
+            pass  # the caller filed it as WA on purpose (e.g. a loose capture)
+        elif ocr_failure:
+            wa_reason, wa_detail = "other", ocr_failure
+        elif template_type == "UNKNOWN":
+            wa_reason = "unrecognized_template"
+            wa_detail = "No template ID could be read from the page."
+        elif id_conf < 1.0 and confidence < _LOW_CONF_ID_THRESHOLD:
+            wa_reason = "ocr_low_confidence"
+            wa_detail = (
+                f"Template ID read only loosely as {template_id} from a "
+                f"{confidence:.0%}-confidence OCR pass."
+            )
         else:
             # Duplicate detection is per volume: a second journal
             # legitimately starts over at RC-001.
             existing = check_duplicate(con, template_id, volume=vol)
             if existing and not force:
                 result["duplicate"] = existing
-                any_vol = check_duplicate(con, template_id)
-                result["error"] = (
-                    f"{template_id} already exists in volume {existing['volume']} "
-                    f"(stored {existing['created_at'][:10]}, #{existing['id']}).\n"
-                    f"  Summary: {existing['summary'] or '(none)'}\n\n"
-                    f"Is this a page from a NEW journal? Upload again with "
-                    f"volume={existing['volume'] + 1}, or run "
-                    f"set_volume(current_volume={existing['volume'] + 1}) once when "
-                    f"starting a new book.\n"
-                    f"Re-uploading the SAME page (e.g. a cleaner photo)? Use force=True to replace it."
-                )
-                return result
-            if existing and force:
+                wa_reason = "id_conflict"
+                wa_detail = _duplicate_detail(template_id, existing)
+                conflicts_with = existing["id"]
+            elif existing and force:
                 con.execute("DELETE FROM captures WHERE id=?", (existing["id"],))
                 con.commit()
 
-        # Parse template
-        parsed  = parse_template(template_type, raw_text)
-        summary = parsed["summary"]
-        tags    = parsed["tags"]
+        if wa_reason == "loose_capture":
+            vol = None  # off-journal material belongs to no book
 
-        result["summary"] = summary
-        result["tags"]    = tags
-
-        # Copy image to data/images/ for self-containment
-        src = Path(image_path)
-        ts  = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        dest = _IMAGES_DIR / f"{template_id or 'unidentified'}_{ts}{src.suffix.lower()}"
-        try:
-            shutil.copy2(src, dest)
-            stored_image = str(dest)
-        except Exception:
-            stored_image = image_path  # fall back to original path
-
-        result["stored_image"] = stored_image
-
-        # Store capture  (unapplied check runs after storing — see below)
-        capture_id = insert_capture(
+        stored = _store_capture(
             con,
-            type_=template_type,
+            template_type=template_type,
             template_id=template_id,
-            content=parsed["fields"],
-            raw_ocr=raw_text,
-            summary=summary,
-            confidence=confidence,
-            image_path=stored_image,
-            volume=vol,
             page_suffix=page_suffix,
+            text=raw_text,
+            confidence=confidence,
+            image_path=image_path,
+            volume=vol,
+            wa_reason=wa_reason,
+            wa_detail=wa_detail,
+            claimed_page_id=template_id if wa_reason else None,
+            conflicts_with=conflicts_with,
+            image_src=Path(image_path),
         )
-        insert_tags(con, capture_id, tags)
-        con.commit()
 
-        if result["unidentified"]:
-            result["_id_note"] = (
-                f"\n  ⚠ No template ID detected — stored as UNIDENTIFIED (#{capture_id}).\n"
-                f"    The text and tags are safe. Fix the ID any time with "
-                f"identify_capture({capture_id}, \"RC-001\"), or re-run the text "
-                f"with correct_ocr({capture_id}, ...) from a cleaner read."
-            )
-        elif id_conf < 1.0:
+        if not wa_reason and id_conf < 1.0:
             result["_id_note"] = (
                 f"\n  ⚠ Template ID read loosely as {template_id} — if that's wrong, "
-                f"call identify_capture({capture_id}, \"<correct-id>\")."
+                f"call identify_capture({stored['capture_id']}, \"<correct-id>\")."
             )
 
-        # Detect connections
-        connections = build_connections(con, capture_id)
-
-        # §2.2a: surface prior uncited findings at the moment of writing
-        result["_unapplied"] = find_unapplied(con, capture_id)
-
-        # Find strongest / most surprising connection for highlight
-        highlight = None
-        if connections:
-            # Sort: prefer tag_overlap with highest strength; break ties by age (oldest = most surprising)
-            def _score(c):
-                age_days = 0
-                other_cap = get_capture(con, c["connected_id"])
-                if other_cap:
-                    try:
-                        dt = datetime.fromisoformat(other_cap["created_at"])
-                        age_days = (datetime.now(timezone.utc) - dt).days
-                    except Exception:
-                        pass
-                return (c["strength"], age_days)
-
-            best = max(connections, key=_score)
-            other = get_capture(con, best["connected_id"])
-            if other:
-                age_days = 0
-                try:
-                    dt = datetime.fromisoformat(other["created_at"])
-                    age_days = (datetime.now(timezone.utc) - dt).days
-                except Exception:
-                    pass
-                highlight = {
-                    "template_id": other["template_id"],
-                    "summary":     other["summary"],
-                    "strength":    best["strength"],
-                    "age_days":    age_days,
-                    "shared_tags": best.get("shared_tags", []),
-                    "method":      best["method"],
-                }
-
-    result["ok"]          = True
-    result["capture_id"]  = capture_id
-    result["connections"] = connections
-    result["highlight"]   = highlight
-    result["_low_conf"]   = low_conf_warning
+    result.update(stored)
+    result.update({
+        "ok": True, "volume": vol, "wa_reason": wa_reason, "wa_detail": wa_detail,
+        "claimed_page_id": template_id if wa_reason else None,
+        "_low_conf": low_conf_warning,
+    })
     return result
 
 
 def _format_upload_result(r: dict, image_path: str) -> str:
-    """Format a _process_image result dict as a human-readable string."""
+    """Format a _process_image / manual_capture result dict as a human-readable string."""
     if not r["ok"]:
         return r["error"]
 
     tag_list = ", ".join(f"{t['prefix']}{t['value']}" for t in r["tags"]) or "none"
-    template_label = r["template_id"] or "UNIDENTIFIED"
-    if r.get("template_id") and r.get("page_suffix"):
-        template_label += r["page_suffix"]
-    lines = [
-        f"Stored capture #{r['capture_id']}",
-        f"  Template : {template_label}",
-        f"  Volume   : {r.get('volume') or 1}",
+    wa = r.get("wa_reason")
+    if wa:
+        lines = [
+            f"Stored capture #{r['capture_id']} as Wild Art {r['template_id']}",
+            f"  Reason   : {wa} — {_WA_REASON_TEXT.get(wa, wa)}",
+        ]
+        if r.get("wa_detail"):
+            lines.append(f"  Detail   : {r['wa_detail']}")
+        if r.get("claimed_page_id"):
+            lines.append(f"  Read as  : {r['claimed_page_id']}")
+        vol = r.get("volume")
+        lines.append(f"  Volume   : {vol if vol is not None else '(none — loose capture)'}")
+    else:
+        template_label = r["template_id"] or "UNIDENTIFIED"
+        if r.get("template_id") and r.get("page_suffix"):
+            template_label += r["page_suffix"]
+        lines = [
+            f"Stored capture #{r['capture_id']}",
+            f"  Template : {template_label}",
+            f"  Volume   : {r.get('volume') or 1}",
+        ]
+    lines += [
         f"  Summary  : {r['summary'] or '(empty)'}",
         f"  Tags     : {tag_list}",
         f"  OCR conf : {r['confidence']:.0%}",
@@ -526,40 +777,101 @@ def _format_upload_result(r: dict, image_path: str) -> str:
             "add @<ID> via correct_ocr()."
         )
 
+    if wa:
+        lines.append("\n" + _wa_next_steps(r))
     return "\n".join(lines)
+
+
+def _wa_next_steps(r: dict) -> str:
+    """What to do about a freshly stored WA entry."""
+    cid, wa = r["capture_id"], r["wa_reason"]
+    if wa == "loose_capture":
+        return (
+            "  Nothing to fix — loose captures are browsable on their own "
+            "(list_by_tag(entry_type=\"WA\", wa_reason=\"loose_capture\")). When a "
+            "journal entry develops the idea, link it: "
+            f"assert_connection(<entry #>, {cid}, \"develops\")."
+        )
+    claimed = r.get("claimed_page_id")
+    ctype = _claimed_type(claimed)
+    if wa == "id_conflict":
+        dup = r.get("duplicate") or {}
+        nxt = (dup.get("volume") or 1) + 1
+        return (
+            f"  Nothing was overwritten — {claimed} (#{dup.get('id')}) is untouched.\n"
+            f"  Next — decide what this page is:\n"
+            f"    • A page from a NEW journal → promote_capture({cid}, \"{ctype}\", "
+            f"\"{claimed}\", volume={nxt}) (and set_volume(current_volume={nxt}) once "
+            f"for the new book).\n"
+            f"    • The page really has a different ID → promote_capture({cid}, "
+            f"\"{ctype}\", \"<correct-id>\").\n"
+            f"    • A cleaner photo of the SAME page → keep whichever you prefer; "
+            f"re-uploading with force=True replaces the original."
+        )
+    target = (f"promote_capture({cid}, \"{ctype}\", \"{claimed}\")" if claimed
+              else f"promote_capture({cid}, \"RC\", \"RC-0NN\")")
+    return (
+        f"  It is in the Wild Art queue (list_by_tag(entry_type=\"WA\")). Once you "
+        f"know what it is, promote it: {target}. Fix the text first with "
+        f"correct_ocr({cid}, ...) if needed."
+    )
 
 
 # ── Tool: upload_capture ──────────────────────────────────────────────────────
 
 @mcp.tool()
-def upload_capture(image_path: str, force: bool = False, volume: int = 0) -> str:
+def upload_capture(
+    image_path: str,
+    force: bool = False,
+    volume: int = 0,
+    wa_reason: str = "",
+    wa_detail: str = "",
+) -> str:
     """
     Process a journal page photo: run OCR, parse the template, extract schema
     tags, store the capture, copy the image to the knowledge base, and detect
     connections to existing captures.
 
-    The page is always stored, even when no template ID can be read — it is
-    kept as UNIDENTIFIED and can be fixed later with identify_capture().
+    Accept-by-default: the page is always stored. If it can't be filed
+    normally — no readable template ID, an ID too doubtful to trust, or a page
+    ID that is already taken — it is stored as a Wild Art (WA) entry with the
+    reason recorded, never rejected and never overwriting anything. Review
+    WA entries with list_by_tag(entry_type="WA") and move them to their
+    proper type with promote_capture().
 
     Args:
         image_path: Absolute path to the image file (JPG, PNG, TIFF, etc.)
-        force:      Set to True to overwrite an existing capture with the same
-                    template ID in the same volume (default False — warns instead).
+        force:      Set to True to REPLACE an existing capture with the same
+                    template ID in the same volume (default False — the new
+                    page is filed as WA with reason id_conflict instead).
         volume:     Which journal/book this page belongs to. 0 = automatic:
                     a volume written on the page (e.g. "V2 RC-001") wins,
                     otherwise the stored current_volume setting (default 1).
+        wa_reason:  File the image as Wild Art on purpose. Use "loose_capture"
+                    for anything off-journal — a napkin sketch, sticky note,
+                    whiteboard, back of a receipt (no volume or page ID
+                    needed). Other values: manual, other.
+        wa_detail:  Free-text note for a WA entry, e.g. "napkin", "whiteboard".
 
     Returns a summary of what was found and stored, including the strongest
     connection detected.
     """
-    result = _process_image(image_path, force=force, volume=volume)
+    result = _process_image(image_path, force=force, volume=volume,
+                            wa_reason=wa_reason, wa_detail=wa_detail)
     return _cloud_ocr_notice() + _format_upload_result(result, image_path)
 
 
 # ── Tool: manual_capture ──────────────────────────────────────────────────────
 
 @mcp.tool()
-def manual_capture(text: str, template_id: str = "", force: bool = False, volume: int = 0) -> str:
+def manual_capture(
+    text: str,
+    template_id: str = "",
+    force: bool = False,
+    volume: int = 0,
+    wa_reason: str = "",
+    wa_detail: str = "",
+) -> str:
     """
     Store a journal capture from transcribed text. This is the PRIMARY path
     for handwritten pages: the user shares a photo of the page, YOU (the
@@ -572,128 +884,113 @@ def manual_capture(text: str, template_id: str = "", force: bool = False, volume
     Tags, etc.) as written, include every schema tag (#topic @source !priority
     ?question $insight *sensory), and treat content inside tag bubbles as tags.
 
+    Accept-by-default: the capture is always stored. A template ID that
+    can't be parsed or found, or a page ID already taken in that volume,
+    files it as a Wild Art (WA) entry with the reason recorded — nothing is
+    rejected and nothing is overwritten.
+
+    3-D isometric grid pages have their own type: pass template_id="ISO-001"
+    (etc.) — transcribe the subject line, labels, and notes around the drawing.
+
     Args:
         text:        The transcribed content of the journal page (all fields
                      you can read — First Impressions, Key Points, Tags, etc.).
-        template_id: Template ID (e.g. "RC-001"). If omitted, the server will
-                     try to detect it from the text automatically.
-        force:       Set to True to overwrite an existing capture with the
-                     same template ID in the same volume (default False — warns).
+        template_id: Template ID (e.g. "RC-001", "ISO-002"). If omitted, the
+                     server will try to detect it from the text automatically.
+                     Pass "WA" to file the capture as Wild Art by hand.
+        force:       Set to True to REPLACE an existing capture with the same
+                     template ID in the same volume (default False — the new
+                     capture is filed as WA with reason id_conflict instead).
         volume:      Which journal/book this page belongs to. 0 = automatic:
                      a volume written on the page/text wins, otherwise the
                      stored current_volume setting (default 1).
+        wa_reason:   File as Wild Art on purpose. Use "loose_capture" for
+                     anything off-journal — a napkin sketch, sticky note,
+                     whiteboard photo, back of a receipt (no volume or page ID
+                     needed). Other values: manual, other.
+        wa_detail:   Free-text note for a WA entry, e.g. "napkin", "sticky note".
 
     Returns the same summary as upload_capture, including any connections
     detected to existing captures.
     """
+    if not text.strip():
+        return "Please provide the transcribed text of the page."
+
+    wa_reason, wa_detail = _normalize_wa_reason(wa_reason, wa_detail)
+    tid_arg = template_id.strip()
+    if not wa_reason and (tid_arg.upper() == "WA" or tid_arg.upper().startswith("WA-")):
+        wa_reason = "manual"
+
     # Detect template ID from the explicit parameter or from the text
-    parsed_id = parse_template_id(template_id) if template_id else parse_template_id(text)
-    if parsed_id["template_type"] == "UNKNOWN":
-        if template_id:
-            return (
-                f"Could not parse template ID '{template_id}'. "
-                "Expected format: RC-001, SYN-003, REV-002, DC-005, etc."
-            )
-        return (
-            "Could not detect a template ID (RC-XXX / SYN-XXX / REV-XXX / DC-XXX) "
-            "in the provided text. Please pass template_id explicitly, "
-            "e.g. template_id=\"RC-001\"."
-        )
+    if wa_reason:
+        source = tid_arg if tid_arg and not tid_arg.upper().startswith("WA") else text
+        parsed_id = parse_template_id(source)
+    else:
+        parsed_id = parse_template_id(tid_arg) if tid_arg else parse_template_id(text)
     template_type = parsed_id["template_type"]
-    tid           = parsed_id["template_id"]
+    tid           = parsed_id["template_id"] or None
     page_suffix   = parsed_id["page_suffix"]
 
     result = {
         "ok": False, "error": None, "capture_id": None,
-        "template_id": tid, "summary": "", "tags": [],
+        "template_id": tid or "", "summary": "", "tags": [],
         "confidence": 1.0, "connections": [], "highlight": None,
         "duplicate": None, "stored_image": "",
         "_low_conf": "", "_id_note": "", "volume": None,
-        "unidentified": False, "page_suffix": page_suffix,
+        "page_suffix": page_suffix, "wa_reason": "", "wa_detail": "",
+        "claimed_page_id": None,
     }
 
     with _db() as con:
         vol = parsed_id["volume"] or volume or get_current_volume(con)
-        result["volume"] = vol
+        conflicts_with = None
 
-        existing = check_duplicate(con, tid, volume=vol)
-        if existing and not force:
-            result["duplicate"] = existing
-            result["error"] = (
-                f"{tid} already exists in volume {existing['volume']} "
-                f"(stored {existing['created_at'][:10]}, #{existing['id']}).\n"
-                f"  Summary: {existing['summary'] or '(none)'}\n\n"
-                f"Is this a page from a NEW journal? Call manual_capture again with "
-                f"volume={existing['volume'] + 1}, or run "
-                f"set_volume(current_volume={existing['volume'] + 1}) once when "
-                f"starting a new book.\n"
-                f"Re-capturing the SAME page? Use force=True to replace it."
-            )
-            return _format_upload_result(result, "")
-        if existing and force:
-            con.execute("DELETE FROM captures WHERE id=?", (existing["id"],))
-            con.commit()
+        if wa_reason:
+            pass
+        elif template_type == "UNKNOWN":
+            if tid_arg:
+                wa_reason = "validation_error"
+                wa_detail = (
+                    f"Could not parse template ID '{tid_arg}' (expected e.g. "
+                    f"RC-001, SYN-003, REV-002, DC-005, ISO-001)."
+                )
+            else:
+                wa_reason = "unrecognized_template"
+                wa_detail = "No template ID given or found in the text."
+        else:
+            existing = check_duplicate(con, tid, volume=vol)
+            if existing and not force:
+                result["duplicate"] = existing
+                wa_reason = "id_conflict"
+                wa_detail = _duplicate_detail(tid, existing)
+                conflicts_with = existing["id"]
+            elif existing and force:
+                con.execute("DELETE FROM captures WHERE id=?", (existing["id"],))
+                con.commit()
 
-        parsed  = parse_template(template_type, text)
-        summary = parsed["summary"]
-        tags    = parsed["tags"]
+        if wa_reason == "loose_capture":
+            vol = None  # off-journal material belongs to no book
 
-        result["summary"] = summary
-        result["tags"]    = tags
-
-        capture_id = insert_capture(
+        stored = _store_capture(
             con,
-            type_=template_type,
+            template_type=template_type,
             template_id=tid,
-            content=parsed["fields"],
-            raw_ocr=text,
-            summary=summary,
+            page_suffix=page_suffix,
+            text=text,
             confidence=1.0,
             image_path="",
             volume=vol,
-            page_suffix=page_suffix,
+            wa_reason=wa_reason,
+            wa_detail=wa_detail,
+            claimed_page_id=tid if wa_reason else None,
+            conflicts_with=conflicts_with,
         )
-        insert_tags(con, capture_id, tags)
-        con.commit()
 
-        connections = build_connections(con, capture_id)
-        result["_unapplied"] = find_unapplied(con, capture_id)
-
-        highlight = None
-        if connections:
-            def _score(c):
-                age_days = 0
-                other_cap = get_capture(con, c["connected_id"])
-                if other_cap:
-                    try:
-                        dt = datetime.fromisoformat(other_cap["created_at"])
-                        age_days = (datetime.now(timezone.utc) - dt).days
-                    except Exception:
-                        pass
-                return (c["strength"], age_days)
-
-            best  = max(connections, key=_score)
-            other = get_capture(con, best["connected_id"])
-            if other:
-                age_days = 0
-                try:
-                    dt = datetime.fromisoformat(other["created_at"])
-                    age_days = (datetime.now(timezone.utc) - dt).days
-                except Exception:
-                    pass
-                highlight = {
-                    "template_id": other["template_id"],
-                    "summary":     other["summary"],
-                    "strength":    best["strength"],
-                    "age_days":    age_days,
-                    "shared_tags": best.get("shared_tags", []),
-                    "method":      best["method"],
-                }
-
-    result["ok"]          = True
-    result["capture_id"]  = capture_id
-    result["connections"] = connections
-    result["highlight"]   = highlight
+    result.update(stored)
+    result.update({
+        "ok": True, "volume": vol, "wa_reason": wa_reason, "wa_detail": wa_detail,
+        "claimed_page_id": tid if wa_reason else None,
+    })
     return _format_upload_result(result, "")
 
 
@@ -783,7 +1080,7 @@ def identify_capture(capture_id: int, template_id: str, volume: int = 0) -> str:
     if parsed_id["template_type"] == "UNKNOWN":
         return (
             f"Could not parse template ID '{template_id}'. "
-            "Expected format: RC-001, SYN-003, REV-002, DC-005, etc."
+            "Expected format: RC-001, SYN-003, REV-002, DC-005, ISO-001, etc."
         )
     ttype, tid, suffix = (
         parsed_id["template_type"], parsed_id["template_id"], parsed_id["page_suffix"]
@@ -793,8 +1090,13 @@ def identify_capture(capture_id: int, template_id: str, volume: int = 0) -> str:
         cap = get_capture(con, capture_id)
         if cap is None:
             return f"No capture with id #{capture_id}."
+    if cap["type"] == "WA":
+        # Filing a Wild Art entry under a page ID is a promotion — route it
+        # there so the WA history is kept and conflicts are refused.
+        return promote_capture(capture_id, ttype, template_id, volume=volume)
 
-        vol = volume or cap.get("volume", 1)
+    with _db() as con:
+        vol = volume or cap.get("volume") or get_current_volume(con)
         existing = check_duplicate(con, tid, volume=vol)
         if existing and existing["id"] != capture_id:
             return (
@@ -803,24 +1105,12 @@ def identify_capture(capture_id: int, template_id: str, volume: int = 0) -> str:
                 f"to a different journal, pass volume=N."
             )
 
-        text    = cap.get("corrected_ocr") or cap["raw_ocr"]
-        parsed  = parse_template(ttype, text)
         con.execute(
-            """UPDATE captures SET type=?, template_id=?, page_suffix=?, volume=?,
-                                   content_json=?, summary=? WHERE id=?""",
-            (ttype, tid, suffix, vol, json.dumps(parsed["fields"]),
-             parsed["summary"], capture_id),
+            "UPDATE captures SET type=?, template_id=?, page_suffix=?, volume=? WHERE id=?",
+            (ttype, tid, suffix, vol, capture_id),
         )
-        con.execute("DELETE FROM tags WHERE capture_id=?", (capture_id,))
-        insert_tags(con, capture_id, parsed["tags"])
-        con.execute(
-            "DELETE FROM connections WHERE type='tag_overlap' AND (source_id=? OR target_id=?)",
-            (capture_id, capture_id),
-        )
-        con.execute(
-            "DELETE FROM connections WHERE type='reference' AND source_id=?",
-            (capture_id,),
-        )
+        text   = cap.get("corrected_ocr") or cap["raw_ocr"]
+        parsed = _reparse_in_place(con, capture_id, ttype, text)
         con.commit()
         connections = build_connections(con, capture_id)
 
@@ -833,6 +1123,159 @@ def identify_capture(capture_id: int, template_id: str, volume: int = 0) -> str:
         f"  {len(connections)} connection(s) after re-parse.\n"
         f"Tip: run rebuild_connections() to pick up any @{tid} references "
         f"written on other pages before this one was identified."
+    )
+
+
+# ── Tool: promote_capture ─────────────────────────────────────────────────────
+
+def _reparse_in_place(con, capture_id: int, ttype: str, text: str) -> dict:
+    """Re-parse a capture's text as *ttype* and rebuild its tags + derived edges."""
+    parsed = parse_template(ttype, text)
+    con.execute(
+        "UPDATE captures SET content_json=?, summary=? WHERE id=?",
+        (json.dumps(parsed["fields"]), parsed["summary"], capture_id),
+    )
+    con.execute("DELETE FROM tags WHERE capture_id=?", (capture_id,))
+    insert_tags(con, capture_id, parsed["tags"])
+    con.execute(
+        "DELETE FROM connections WHERE type='tag_overlap' AND (source_id=? OR target_id=?)",
+        (capture_id, capture_id),
+    )
+    con.execute(
+        "DELETE FROM connections WHERE type='reference' AND source_id=?",
+        (capture_id,),
+    )
+    return parsed
+
+
+@mcp.tool()
+def promote_capture(
+    capture_id: int,
+    target_type: str,
+    target_page_id: str = "",
+    volume: int = 0,
+    force: bool = False,
+) -> str:
+    """
+    Move a Wild Art (WA) entry to its proper type after review — RC, SYN,
+    REV, DC, or ISO (3-D isometric grid page).
+
+    The capture keeps its #id, text, image, and asserted links; it is
+    re-parsed as the target type. Its WA history is preserved on the
+    promoted entry: promoted_from (the WA-NNN ID), wa_reason, and wa_detail.
+
+    If the target page ID is already taken in that volume, NOTHING changes:
+    the conflict is reported and you choose — a different page ID, a
+    different volume (a page from a new journal), or force=True. Page IDs are
+    never renumbered automatically.
+
+    Args:
+        capture_id:     The WA entry's numeric ID (#N).
+        target_type:    RC | SYN | REV | DC | ISO.
+        target_page_id: The page ID to file it under, e.g. "RC-014". Optional
+                        when the page was read with an ID (claimed_page_id)
+                        of the target type — that ID is used.
+        volume:         Journal volume to file it in (0 = the volume the WA
+                        entry already has, else the current writing volume).
+        force:          DANGEROUS. Take the page ID even though another
+                        capture holds it. The current holder is not deleted —
+                        it is moved to Wild Art itself (reason id_conflict,
+                        conflicts_with pointing here) — but every @reference
+                        to that page ID from now on resolves to THIS capture.
+                        Only use it when you are sure the current holder is
+                        the misfiled one.
+    """
+    ttype = target_type.strip().upper()
+    if ttype not in PAGE_TYPES:
+        return f"Unknown target type {target_type!r} — use one of: {', '.join(PAGE_TYPES)}."
+
+    with _db() as con:
+        cap = get_capture(con, capture_id)
+        if cap is None:
+            return f"No capture with id #{capture_id}."
+        if cap["type"] != "WA":
+            label = cap["template_id"] or f"#{capture_id}"
+            return (
+                f"Capture #{capture_id} ({label}) is not a Wild Art entry — it is "
+                f"already filed as {cap['type']}. To change a stored page's ID, "
+                f"use identify_capture()."
+            )
+
+        wa_id = cap["template_id"]
+        raw_id = target_page_id.strip()
+        if not raw_id:
+            claimed = cap.get("claimed_page_id") or ""
+            if claimed and _claimed_type(claimed) == ttype:
+                raw_id = claimed
+            else:
+                hint = f" (it was read as {claimed})" if claimed else ""
+                return (
+                    f"{wa_id} has no {ttype} page ID to use{hint}. Pass one: "
+                    f"promote_capture({capture_id}, \"{ttype}\", \"{ttype}-0NN\")."
+                )
+
+        parsed_id = parse_template_id(raw_id)
+        if parsed_id["template_type"] != ttype:
+            return (
+                f"{raw_id!r} is not a {ttype} page ID (expected e.g. {ttype}-001). "
+                f"Nothing was changed."
+            )
+        tid, suffix = parsed_id["template_id"], parsed_id["page_suffix"]
+        vol = volume or parsed_id["volume"] or cap.get("volume") or get_current_volume(con)
+
+        existing = check_duplicate(con, tid, volume=vol)
+        if existing and existing["id"] != capture_id and not force:
+            return (
+                f"Not promoted: {tid} is already taken in volume {vol} by "
+                f"#{existing['id']} (stored {existing['created_at'][:10]}).\n"
+                f"  Its summary: {existing['summary'] or '(none)'}\n"
+                f"  {wa_id} is unchanged. Choose one:\n"
+                f"    • a different page ID → promote_capture({capture_id}, \"{ttype}\", \"<other-id>\")\n"
+                f"    • a different journal volume → promote_capture({capture_id}, "
+                f"\"{ttype}\", \"{tid}\", volume={vol + 1})\n"
+                f"    • force=True — DANGEROUS: moves #{existing['id']} to Wild Art and "
+                f"gives {tid} to this capture."
+            )
+
+        demoted_note = ""
+        if existing and existing["id"] != capture_id and force:
+            demote_id = get_next_wa_id(con)
+            con.execute(
+                """UPDATE captures SET type='WA', template_id=?, page_suffix=NULL,
+                          wa_reason='id_conflict', wa_detail=?, claimed_page_id=?,
+                          conflicts_with=? WHERE id=?""",
+                (demote_id,
+                 f"Displaced from {tid} by promote_capture(force=True) of {wa_id} (#{capture_id}).",
+                 tid, capture_id, existing["id"]),
+            )
+            demoted_note = (
+                f"\n  ⚠ force: #{existing['id']} (was {tid}) moved to Wild Art as "
+                f"{demote_id} — nothing deleted; promote it again once you know "
+                f"its right ID."
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        con.execute(
+            """UPDATE captures SET type=?, template_id=?, page_suffix=?, volume=?,
+                      promoted_from=?, promoted_at=? WHERE id=?""",
+            (ttype, tid, suffix, vol, wa_id, now, capture_id),
+        )
+        text = cap.get("corrected_ocr") or cap["raw_ocr"]
+        parsed = _reparse_in_place(con, capture_id, ttype, text)
+        con.commit()
+        connections = build_connections(con, capture_id)
+
+    tag_list = ", ".join(f"{t['prefix']}{t['value']}" for t in parsed["tags"]) or "none"
+    return (
+        f"Promoted {wa_id} (#{capture_id}) → {tid + (suffix or '')} (volume {vol}).\n"
+        f"  History  : promoted_from={wa_id}, original reason {cap.get('wa_reason') or 'other'}"
+        + (f" ({cap['wa_detail']})" if cap.get("wa_detail") else "") + "\n"
+        f"  Summary  : {parsed['summary'] or '(empty)'}\n"
+        f"  Tags     : {tag_list}\n"
+        f"  {len(connections)} connection(s) after re-parse."
+        f"{demoted_note}\n"
+        f"Tip: run rebuild_connections() to pick up any @{tid} references "
+        f"written on other pages before this one was filed."
     )
 
 
@@ -987,6 +1430,10 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
       observes   — source (an AIEX observation entry) notes target (a DC
                    page)'s cross-domain echo or confirmed symbol meaning.
                    Normally set automatically by commit_observation().
+      develops   — source (a journal entry, e.g. a SYN page) develops the
+                   idea first scribbled in target (typically a loose Wild Art
+                   capture — a napkin sketch or sticky note). The scribble
+                   stays as the source; nothing is closed out.
 
     Automatic contradiction detection is deliberately not offered — it
     cannot be done reliably. Supersession is either asserted here by a
@@ -995,12 +1442,12 @@ def assert_connection(source_id: int, target_id: int, relation: str, note: str =
 
     Args:
         source_id: The newer / asserting capture (numeric ID).
-        target_id: The capture being superseded / refuted / supported / distilled / assessed / observed.
-        relation:  supersedes | refutes | narrows | supports | distills | assesses | observes
+        target_id: The capture being superseded / refuted / supported / distilled / assessed / observed / developed.
+        relation:  supersedes | refutes | narrows | supports | distills | assesses | observes | develops
         note:      Optional one-line reason, stored on the edge.
     """
     relation = relation.strip().lower()
-    valid = {"supersedes", "refutes", "narrows", "supports", "distills", "assesses", "observes"}
+    valid = {"supersedes", "refutes", "narrows", "supports", "distills", "assesses", "observes", "develops"}
     if relation not in valid:
         return f"Unknown relation {relation!r} — use one of: {', '.join(sorted(valid))}."
     if source_id == target_id:
@@ -1272,41 +1719,40 @@ def export_html(file_path: str = "") -> str:
     browser for the whole journal that opens in any web browser, works
     offline, and needs no install.
 
-    Four overview modes:
+    Three tabs, plus connections on every card:
       Timeline    — every capture chronologically, with live search and
-                    type / volume / journal-vs-AI filters; superseded
-                    captures hidden behind a toggle. Each card also lists
-                    its connections (mode 3) — click one to jump to the
-                    connected capture.
+                    type / Wild Art reason / volume / journal-vs-AI filters
+                    (WA and ISO are always in the type filter); superseded
+                    captures hidden behind a toggle. Each card lists its
+                    typed connections — click one to jump to that capture.
+                    Wild Art cards show their reason, the page ID they were
+                    read as, and a link to the capture they conflict with.
       Index       — tags grouped by meaning (topics, dream themes, open
                     questions, insights, motifs, sensory details) plus the
                     entity register; every entry click-filters the timeline.
-      Connections — (mode 3, built into every Timeline card, not a separate
-                    tab) typed, directional links — references and asserted
-                    relations always shown, tag/entity overlap only above
-                    strength 2.0 so a well-tagged capture doesn't drown in
-                    weak matches.
-      Graph       — a two-layer ego-centric local graph. The landing view
-                    is a cluster/tag overview — captures grouped into
-                    bubbles by tag, theme, or entity, bubble size = capture
-                    count — so it stays legible at any database size,
-                    never rendering more than one screen of aggregates.
-                    Click a bubble (or "view in graph" on any capture) to
-                    drill into a fixed radial layout: the clicked item
-                    sits centered, its direct connections (or, for a
-                    cluster, its member captures) arranged evenly around
-                    it. Click any neighbor to recenter and redraw; Back
-                    retraces the history stack down to the landing view.
-                    High-degree nodes are capped — a "+N more" node
-                    expands the ring on click rather than degrading into
-                    overlap. No physics simulation and no rotation.
+      Graph       — an ego-centric local graph (no rotating globe, no
+                    physics). The landing view groups captures into bubbles
+                    by tag, theme, or entity (size = capture count). Click a
+                    bubble, or "view in graph" on any card, to drill into a
+                    fixed radial layout: the item centered, its direct
+                    connections (or a cluster's members) around it. Click a
+                    neighbor to recenter; "+N more" expands a busy ring.
+
+    Navigation: every view change is a browser history step mirrored in the
+    URL hash, so the in-app "← Back" button AND the browser's Back button
+    step back through views inside the page (the browser's leaves the page
+    only from the first view), and reloading reopens the same view.
+
+    The footer records the ksj-mcp, mcp, pydantic, and Python versions, the
+    export time, and capture / entity / connection counts.
 
     All data is inlined in the file: sharing or archiving the file shares a
     snapshot of the knowledge base.
 
     Args:
-        file_path: Where to write. Default: ksj-view.html in the KSJ data
-                   directory.
+        file_path: Where to write. Default (recommended, and required on
+                   Windows): leave empty — writes ksj-view.html in the KSJ
+                   data directory.
     """
     with _db() as con:
         data = collect_view_data(con)
@@ -1337,8 +1783,11 @@ def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
 
     Finds every image file (JPG, PNG, TIFF, BMP, WebP) in the folder and runs
     the full upload pipeline on each one. Non-image files are skipped silently.
-    Pages without a readable template ID are stored as UNIDENTIFIED rather
-    than skipped. Pass volume=N when importing a second (or later) journal.
+    Accept-by-default: no page is skipped. Pages without a readable template
+    ID, or whose page ID is already taken, are stored as Wild Art (WA)
+    entries with the reason recorded — review them afterwards with
+    list_by_tag(entry_type="WA") and promote_capture(). Pass volume=N when
+    importing a second (or later) journal.
 
     Note: by default this path uses local Tesseract OCR, which performs
     poorly on cursive handwriting. For a handful of pages, share photos in
@@ -1349,8 +1798,9 @@ def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
 
     Args:
         folder_path: Absolute path to the folder containing journal photos.
-        force:       Set to True to overwrite existing captures with matching
-                     template IDs (default False — skips duplicates with a warning).
+        force:       Set to True to REPLACE existing captures with matching
+                     template IDs (default False — the new page is filed as
+                     WA with reason id_conflict; the existing one is untouched).
 
     Returns a summary table of all processed images.
     """
@@ -1368,7 +1818,7 @@ def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
     if not images:
         return f"No image files found in {folder_path}"
 
-    ok_count = dupe_count = error_count = 0
+    ok_count = wa_count = error_count = 0
     lines = [
         _cloud_ocr_notice()
         + f"Bulk upload — {len(images)} image(s) found in {folder_path}\n{'─' * 50}"
@@ -1377,16 +1827,18 @@ def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
     for img in images:
         result = _process_image(str(img), force=force, volume=volume)
 
-        if result["duplicate"] and not force:
-            dupe_count += 1
-            lines.append(
-                f"  SKIP  {img.name}\n"
-                f"        {result['template_id']} already exists (#{result['duplicate']['id']}) — use force=True to overwrite"
-            )
-        elif not result["ok"]:
+        if not result["ok"]:
             error_count += 1
             err = (result["error"] or "Unknown error").split("\n")[0]
             lines.append(f"  ERROR {img.name}\n        {err}")
+        elif result["wa_reason"]:
+            wa_count += 1
+            claimed = f" (read as {result['claimed_page_id']})" if result["claimed_page_id"] else ""
+            lines.append(
+                f"  WA    {img.name}  →  {result['template_id']} #{result['capture_id']}"
+                f"  [{result['wa_reason']}]{claimed}\n"
+                f"        {result['wa_detail']}"
+            )
         else:
             ok_count += 1
             tag_count  = len(result["tags"])
@@ -1401,7 +1853,15 @@ def bulk_upload(folder_path: str, force: bool = False, volume: int = 0) -> str:
             )
 
     lines.append(f"\n{'─' * 50}")
-    lines.append(f"Done: {ok_count} stored, {dupe_count} skipped (duplicate), {error_count} failed")
+    lines.append(
+        f"Done: {ok_count + wa_count} stored ({ok_count} filed, {wa_count} as Wild Art), "
+        f"{error_count} failed"
+    )
+    if wa_count:
+        lines.append(
+            "Wild Art entries are kept, not lost — review them with "
+            "list_by_tag(entry_type=\"WA\") and file each with promote_capture()."
+        )
     return "\n".join(lines)
 
 
@@ -1413,10 +1873,12 @@ def search_captures(
     tag_filter: str = "",
     date_from: str = "",
     date_to: str = "",
+    entry_type: str = "",
+    wa_reason: str = "",
 ) -> str:
     """
     Search all journal entries by concept, keyword, or phrase — across every
-    template type (RC, SYN, REV, DC) at once.
+    template type (RC, SYN, REV, DC, ISO, WA, AIEX) at once.
 
     This is the primary way to find entries by idea rather than tag. Use it
     whenever the user asks to find notes, recall something they wrote, or
@@ -1433,11 +1895,17 @@ def search_captures(
         tag_filter: Optional tag value to narrow results (e.g. "machine-learning").
         date_from:  Optional ISO date lower bound (e.g. "2025-09-01").
         date_to:    Optional ISO date upper bound (e.g. "2025-12-31").
+        entry_type: Optional type filter: RC, SYN, REV, DC, ISO, WA, AIEX.
+        wa_reason:  Optional Wild Art reason filter (id_conflict,
+                    unrecognized_template, ocr_low_confidence,
+                    validation_error, loose_capture, manual, other).
 
     Note: search matches terms that appear in the journal text. For tag-only
     browsing without a text query, use list_by_tag instead.
     """
     if not query.strip():
+        if entry_type or wa_reason:
+            return list_by_tag("", entry_type=entry_type, wa_reason=wa_reason)
         return "Please provide a search query."
 
     with _db() as con:
@@ -1449,6 +1917,8 @@ def search_captures(
             date_from=date_from or None,
             date_to=date_to or None,
             volumes=vols,
+            entry_type=entry_type.strip(),
+            wa_reason=wa_reason.strip(),
         )
 
     if not results:
@@ -1457,9 +1927,10 @@ def search_captures(
     lines = [f"Found {len(results)} capture(s) for {query!r}:\n"]
     for r in results:
         tag_str = " ".join(f"{t['prefix']}{t['value']}" for t in r.get("tags", [])[:5])
-        vol_str = f" vol {r['volume']}" if r.get("volume", 1) != 1 else ""
+        vol_str = _vol_label(r.get("volume", 1))
+        wa_str = f" [WA: {r['wa_reason']}]" if r.get("type") == "WA" else ""
         lines.append(
-            f"  [{r['template_id'] or 'UNIDENTIFIED'}]{vol_str} #{r['id']}  conf={r['confidence']:.0%}\n"
+            f"  [{r['template_id'] or 'UNIDENTIFIED'}]{vol_str}{wa_str} #{r['id']}  conf={r['confidence']:.0%}\n"
             f"    {r['summary'] or '(no summary)'}\n"
             f"    Tags: {tag_str or 'none'}\n"
             f"    Date: {r['created_at'][:10]}\n"
@@ -1518,7 +1989,7 @@ def find_connections(capture_id: int, min_strength: float = 2.0, limit: int = 20
             dir_label = "↔ shares entities with"
         else:
             dir_label = "↔ shares tags with"
-        vol_str = f" (vol {c['connected_volume']})" if c.get("connected_volume", 1) != 1 else ""
+        vol_str = _vol_label(c.get("connected_volume", 1), paren=True)
         superseded = "  [superseded]" if c.get("connected_valid_until") else ""
         note_str = f"\n    note: {c['note']}" if c.get("note") else ""
         lines.append(
@@ -1552,8 +2023,10 @@ def get_stats() -> str:
     by_type = stats["by_type"]
     type_lines = "\n".join(
         f"  {t}: {by_type.get(t, 0)}"
-        for t in ("RC", "SYN", "REV", "DC", "AIEX")
+        for t in ("RC", "SYN", "REV", "DC", "ISO", "WA", "AIEX")
     )
+    if by_type.get("UNKNOWN"):
+        type_lines += f"\n  UNIDENTIFIED (pre-3.7): {by_type['UNKNOWN']}"
     top_tags = "\n".join(
         f"  {r['tag']}  ({r['cnt']} captures)"
         for r in stats["top_tags"]
@@ -1570,12 +2043,27 @@ def get_stats() -> str:
         f"{'─' * 40}\n"
         f"Total captures : {stats['total_captures']}\n\n"
         f"By type:\n{type_lines}\n\n"
+        f"{_wa_summary(stats['wild_art'])}\n\n"
         f"Open questions (?)  : {stats['open_questions']}\n"
         f"Key insights  ($)   : {stats['key_insights']}\n\n"
         f"Top tags:\n{top_tags or '  (none yet)'}\n\n"
         f"Date range: {date_str}"
         + scope_note
     )
+
+
+def _wa_summary(wa: dict) -> str:
+    """Wild Art counts, split into real failures vs. deliberate loose captures."""
+    attention = {r: n for r, n in wa["by_reason"].items() if r != "loose_capture"}
+    detail = ", ".join(f"{r} {n}" for r, n in sorted(attention.items(), key=lambda x: -x[1]))
+    lines = [
+        f"Wild Art (WA)       : {wa['total']}",
+        f"  needs attention   : {wa['needs_attention']}" + (f"  ({detail})" if detail else ""),
+        f"  loose captures    : {wa['loose']}  (off-journal — no action needed)",
+    ]
+    if wa["needs_attention"]:
+        lines.append('  Review with list_by_tag(entry_type="WA"); file with promote_capture().')
+    return "\n".join(lines)
 
 
 # ── Tool: get_version ──────────────────────────────────────────────────────────
@@ -1653,7 +2141,7 @@ def export_captures(format: str = "markdown", tag_filter: str = "") -> str:
         out = [
             "---",
             f"template_id: {c['template_id'] or 'unidentified'}",
-            f"volume: {c.get('volume', 1)}",
+            f"volume: {c.get('volume') if c.get('volume') is not None else 'none (loose capture)'}",
             f"capture_id: {c['id']}",
             f"date: {c['created_at'][:10]}",
             f"source: {c.get('source', 'journal')}",
@@ -2283,6 +2771,7 @@ def journal_health() -> str:
     """
     with _db() as con:
         kpis = get_journal_kpis(con)
+        wa = get_wa_counts(con)  # all volumes, like the other KPIs
 
     if kpis["total"] == 0:
         return "Your knowledge base is empty. Upload a journal photo to get started."
@@ -2337,6 +2826,14 @@ def journal_health() -> str:
                else f"Consider trying a {template_desc[t]} page.")
         )
 
+    # ── Wild Art queue (not scored: a WA entry is a page kept, not lost) ──
+    if wa["needs_attention"]:
+        recommendations.append(
+            f"◇ {wa['needs_attention']} Wild Art entr{'y' if wa['needs_attention'] == 1 else 'ies'} "
+            f"waiting for review (pages that couldn't be filed automatically). "
+            f'Browse with list_by_tag(entry_type="WA") and file each with promote_capture().'
+        )
+
     # ── Velocity ───────────────────────────────────────────────────────
     vel = kpis["capture_velocity"]
     ins = kpis["insight_velocity"]
@@ -2373,8 +2870,8 @@ def journal_health() -> str:
         "Captures by type:",
     ] + [
         f"  {t}: {by_type.get(t, 0)}"
-        for t in ("RC", "SYN", "REV", "DC")
-    ]
+        for t in ("RC", "SYN", "REV", "DC", "ISO")
+    ] + ["", _wa_summary(wa)]
 
     if recommendations:
         lines += ["", "Recommendations:"]
@@ -2389,9 +2886,16 @@ def journal_health() -> str:
 # ── Tool: list_by_tag ─────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_by_tag(tag: str, prefix: str = "", role: str = "") -> str:
+def list_by_tag(
+    tag: str = "",
+    prefix: str = "",
+    role: str = "",
+    entry_type: str = "",
+    wa_reason: str = "",
+) -> str:
     """
     Browse all captures that carry a specific tag — no text query required.
+    Also browses by entry type, which is how to review the Wild Art queue.
 
     Use this to find every note related to a topic, source, question, or insight:
       list_by_tag("machine-learning")           → all captures with that tag
@@ -2399,6 +2903,10 @@ def list_by_tag(tag: str, prefix: str = "", role: str = "") -> str:
       list_by_tag("RC-012", prefix="@")          → captures referencing @RC-012
       list_by_tag("deadline", prefix="!")        → priority items
       list_by_tag("falling", role="motif")       → DC recurring motifs only
+      list_by_tag(entry_type="WA")               → every unresolved Wild Art entry
+      list_by_tag(entry_type="WA", wa_reason="id_conflict") → page-ID conflicts
+      list_by_tag(entry_type="WA", wa_reason="loose_capture") → napkins, sticky notes…
+      list_by_tag(entry_type="ISO")              → 3-D isometric grid pages
 
     The same prefix character means different things on Dream Capture pages
     (# theme, @ symbol, ! motif) than on RC/SYN/REV (# topic, @ reference,
@@ -2407,34 +2915,55 @@ def list_by_tag(tag: str, prefix: str = "", role: str = "") -> str:
     causal, sensory.
 
     Args:
-        tag:    Tag value to look up (without the prefix character).
-        prefix: Optional prefix character: #  @  !  ?  $  *  ->
-        role:   Optional semantic role — the precise way to disambiguate
-                DC vs RC/SYN/REV meanings.
+        tag:        Tag value to look up (without the prefix character).
+                    May be empty when entry_type or wa_reason is given.
+        prefix:     Optional prefix character: #  @  !  ?  $  *  ->
+        role:       Optional semantic role — the precise way to disambiguate
+                    DC vs RC/SYN/REV meanings.
+        entry_type: Optional type filter: RC, SYN, REV, DC, ISO, WA, AIEX.
+        wa_reason:  Optional Wild Art reason: id_conflict,
+                    unrecognized_template, ocr_low_confidence,
+                    validation_error, loose_capture, manual, other.
     """
-    if not tag.strip():
-        return "Please provide a tag value to look up."
+    tag, entry_type, wa_reason = tag.strip(), entry_type.strip().upper(), wa_reason.strip().lower()
+    if wa_reason and not entry_type:
+        entry_type = "WA"
+    if not tag and not entry_type:
+        return "Please provide a tag value to look up (or an entry_type such as \"WA\")."
 
     with _db() as con:
         vols, scope_note = _read_scope(con)
         results = get_captures_by_tag(
-            con, tag.strip(), prefix=prefix.strip(), role=role.strip(), volumes=vols
+            con, tag, prefix=prefix.strip(), role=role.strip(), volumes=vols,
+            entry_type=entry_type, wa_reason=wa_reason,
         )
 
+    filt = " ".join(x for x in (
+        f"type={entry_type}" if entry_type else "",
+        f"wa_reason={wa_reason}" if wa_reason else "",
+    ) if x)
     if not results:
+        if not tag:
+            return f"No captures found with {filt}." + scope_note
         pfx_str = f"{prefix}{tag}" if prefix else tag
         role_str = f" (role={role})" if role else ""
-        return f"No captures found with tag: {pfx_str!r}{role_str}" + scope_note
+        filt_str = f" [{filt}]" if filt else ""
+        return f"No captures found with tag: {pfx_str!r}{role_str}{filt_str}" + scope_note
 
     # When a colliding prefix is queried without a role, report the split
     # rather than silently merging different meanings into one list (§1.10).
     role_counts: dict[str, int] = {}
     for r in results:
-        role_counts[r.get("matched_role") or "untyped"] = \
-            role_counts.get(r.get("matched_role") or "untyped", 0) + 1
+        if tag:
+            role_counts[r.get("matched_role") or "untyped"] = \
+                role_counts.get(r.get("matched_role") or "untyped", 0) + 1
 
-    pfx_label = f"{prefix}{tag}" if prefix else tag
-    lines = [f"Captures tagged {pfx_label!r}  ({len(results)} found):"]
+    if tag:
+        pfx_label = f"{prefix}{tag}" if prefix else tag
+        head = f"Captures tagged {pfx_label!r}" + (f" [{filt}]" if filt else "")
+    else:
+        head = f"Captures with {filt}"
+    lines = [f"{head}  ({len(results)} found):"]
     if not role and len(role_counts) > 1:
         split = ", ".join(f"{n} as {r}" for r, n in sorted(role_counts.items()))
         lines.append(
@@ -2445,11 +2974,18 @@ def list_by_tag(tag: str, prefix: str = "", role: str = "") -> str:
     for r in results:
         tag_str = " ".join(f"{t['prefix']}{t['value']}" for t in r.get("tags", [])[:5])
         role_note = f"  ({r['matched_role']})" if r.get("matched_role") else ""
-        vol_str = f" vol {r['volume']}" if r.get("volume", 1) != 1 else ""
+        vol_str = _vol_label(r.get("volume"))
+        wa_lines = ""
+        if r.get("type") == "WA":
+            claimed = f", read as {r['claimed_page_id']}" if r.get("claimed_page_id") else ""
+            conflict = f", conflicts with #{r['conflicts_with']}" if r.get("conflicts_with") else ""
+            detail = f" — {r['wa_detail']}" if r.get("wa_detail") else ""
+            wa_lines = f"    Wild Art: {r.get('wa_reason') or 'other'}{claimed}{conflict}{detail}\n"
         lines.append(
             f"  [{r['template_id'] or 'UNIDENTIFIED'}]{vol_str} #{r['id']}  "
             f"{r['created_at'][:10]}{role_note}\n"
             f"    {r['summary'] or '(no summary)'}\n"
+            f"{wa_lines}"
             f"    Tags: {tag_str or 'none'}\n"
         )
     return "\n".join(lines) + scope_note
@@ -3450,7 +3986,7 @@ def extract_insights(session_text: str, source_platform: str = "") -> str:
     by_type  = stats["by_type"]
     type_str = "  ".join(
         f"{t}: {by_type.get(t, 0)}"
-        for t in ("RC", "SYN", "REV", "DC", "AIEX")
+        for t in ("RC", "SYN", "REV", "DC", "ISO", "WA", "AIEX")
     )
     platform_line = f"**Platform:** {source_platform}" if source_platform else "**Platform:** (unspecified)"
 
@@ -3720,6 +4256,9 @@ def commit_aiex(session_json: str) -> str:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    # Begin opening the store now, in parallel with the handshake — by the
+    # time the client's first tool call arrives it is normally already done.
+    _start_store_init()
     mcp.run(transport="stdio")
 
 

@@ -29,8 +29,16 @@ Every line has a `kind` field. The first line is always the header.
  "valid_from": "2026-06-14T09:30:00+00:00", "valid_until": null}
 ```
 
-- `type`: `RC | SYN | REV | DC | AIEX | UNKNOWN`
-- `template_id` is `null` for unidentified pages
+- `type`: `RC | SYN | REV | DC | ISO | WA | AIEX | UNKNOWN`
+  (`ISO` = 3-D isometric grid page, `WA` = Wild Art, both since v3.7.0)
+- `template_id` is `null` for unidentified (pre-3.7) pages
+- `volume` is `null` only for loose Wild Art captures (off-journal material)
+- Wild Art fields, present only when set (v3.7.0+; older readers ignore them):
+  `wa_reason` (`id_conflict | unrecognized_template | ocr_low_confidence |
+  validation_error | loose_capture | manual | other`), `wa_detail`,
+  `claimed_page_id` (the page ID the page was read as), `conflicts_with`
+  (capture `id` holding that page ID, remapped on import), `promoted_from`
+  (the `WA-NNN` ID of a promoted entry), `promoted_at`
 - `source`: `journal` (hand-written) or `ai_extract` (AIEX entries)
 - `valid_until` set = this capture was superseded (kept for history)
 - `raw_ocr` is always the original read; `corrected_ocr` the fixed version
@@ -64,7 +72,7 @@ Every line has a `kind` field. The first line is always the header.
 ```
 
 - `type`: `tag_overlap | entity_overlap | reference | asserted`
-- `relation` is set only on asserted edges: `supersedes | refutes | narrows | supports`
+- `relation` is set only on asserted edges: `supersedes | refutes | narrows | supports | distills | assesses | observes | develops`
 - `asserted_by`: `user` (human assertion) or `derived` (computed)
 
 ## Import semantics
