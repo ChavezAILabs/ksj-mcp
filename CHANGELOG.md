@@ -1,5 +1,71 @@
 # Changelog
 
+## 3.8.0 — 2026-09-28
+
+Two fixes from the 2026-09-25 test pass of 3.7.0: a bounded connection graph
+with a fast rebuild (F1), and a section parser that reads the layouts people
+and assistants actually write (F2). A one-time migration applies both to
+existing journals.
+
+### Bounded tag-overlap graph (F1)
+
+- **Before:** any two captures sharing any tag were linked. On a 1,021-capture
+  journal that was 347,747 `tag_overlap` edges — 67% of all possible pairs —
+  so `find_connections`, `neighborhood` and `find_path` were mostly noise, and
+  backups ran to 61 MB.
+- **Tags that name the kind of note never create edges:** `$insight`,
+  `?question`, `!priority`. Chosen by role, not prefix — on DC pages `!` is a
+  dream motif, which is topical and still links.
+- **Each capture keeps at most 25 tag edges** (`TAG_LINKS_PER_CAPTURE`).
+  Candidates sharing a rare tag (on ≤ 10% of captures, floor 10) rank first;
+  candidates sharing only common tags fill the remaining slots, strongest
+  first, then nearest in time — so an entry tagged only `#rh-investigation`
+  links to its neighbours in that thread. An edge exists when it is in either
+  endpoint's list. A plain frequency cut-off was measured and rejected: at 10%
+  it left 362 captures (35%) with no connections at all.
+- **`rebuild_connections` is one pass and one transaction:** each unordered
+  pair is computed once, rows are bulk-inserted, and other ksj processes see
+  the old graph or the new one, never a half-built one. `insert_connection`
+  uses `RETURNING id` instead of a follow-up query, and `build_connections`
+  looks up target template IDs in one query.
+- Same journal after the change: 17,170 edges (3.3% of pairs); rebuild
+  **410 s → 6.3 s**; `find_connections` for AIEX-520 still ranks AIEX-512 and
+  AIEX-513 at the top. Captures with no connections: 17 → 20 (the three new
+  ones shared nothing but `$insight`).
+- **`rebuild_connections` output** now breaks edges down by type (tag overlap,
+  entity overlap, references, asserted). It previously counted asserted edges
+  as "overlap".
+
+### Section parsing (F2)
+
+- **`Label: value` on one line is read.** The parser required a newline after
+  every label, so assistant transcriptions (`First Impressions: …`) produced
+  empty fields and empty summaries.
+- **Sections end at the next label, reliably:** any known label for any
+  template, metadata labels (Date, Source, Subject, Topic, Focus…), a label
+  alone on its line ending in `:` ("Action Items:", "IMMEDIATE (this week):"),
+  or an ALL-CAPS heading ("AI QUERIES", "NEXT STEPS"). The old end-of-section
+  rule was disabled by its own case-insensitive flag, so sections without a
+  colon bled into each other.
+- Labels match only at the start of a line; `**Label:**` and `### Label` are
+  accepted; bullets (`- Notes: x`) and prose that begins with a label word
+  stay content.
+- **A tag list is never a summary.** When no content field is found the
+  summary is the page's first meaningful line.
+- Placeholders such as `(none)` in Quick Questions or Tags no longer become
+  tags.
+- SYN pages: "Patterns discovered" / "Patterns identified" fill `patterns`.
+
+### Migration
+
+- `migrate_v38` runs once at startup (off the handshake path, after
+  `init_db`): copies `captures.db` to `captures.db.bak-v38`, re-parses
+  RC/SYN/REV/DC/ISO captures from `COALESCE(corrected_ocr, raw_ocr)`, and the
+  server then rebuilds the graph. AIEX and WA entries, hand-asserted entities
+  and user-asserted edges are untouched. On the 1,021-capture journal it took
+  about 30 s on a Celeron N4120 under full load. Completion is recorded in the
+  `settings` table (`migrated_v38`).
+
 ## 3.7.0 — 2026-09-24
 
 Three workstreams: a fast `initialize` handshake, back/forward navigation in

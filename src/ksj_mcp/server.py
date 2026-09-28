@@ -70,6 +70,7 @@ from .database import (
     migrate_v3,
     migrate_v31,
     migrate_v37,
+    migrate_v38,
     PAGE_TYPES,
     WA_REASONS,
     get_next_wa_id,
@@ -269,10 +270,13 @@ def _init_store() -> None:
     migrate_v37(_DB_PATH)
     init_db(_DB_PATH)
     # (images/ is created on first use, by _store_capture)
+    # v3.8 runs after init_db: it records completion in the settings table.
+    v38_migrated = migrate_v38(_DB_PATH)
 
-    if v3_migrated:
-        # §1.13 rule 8: edge semantics changed (IDF strengths, typed dedup), so
-        # the graph is re-derived from current tags and text after migration.
+    if v3_migrated or v38_migrated:
+        # §1.13 rule 8: edge semantics changed (v3: IDF strengths, typed dedup;
+        # v3.8: bounded tag graph, re-parsed tags), so the graph is re-derived
+        # from current tags and text after migration.
         con = get_connection(_DB_PATH)
         try:
             db_rebuild_connections(con)
@@ -1401,9 +1405,11 @@ def rebuild_connections() -> str:
     return (
         f"Connection graph rebuilt.\n"
         f"  Captures processed : {stats['captures']}\n"
-        f"  Edges              : {stats['edges']} "
-        f"({stats['references']} reference(s), "
-        f"{stats['edges'] - stats['references']} overlap)"
+        f"  Edges              : {stats['edges']}\n"
+        f"    tag overlap      : {stats['tag_overlap']}\n"
+        f"    entity overlap   : {stats['entity_overlap']}\n"
+        f"    references       : {stats['references']}\n"
+        f"    asserted (kept)  : {stats['asserted']}"
     )
 
 

@@ -60,11 +60,20 @@ class TestFindTagConnections:
     def test_strength_reflects_overlap_count(self, db):
         a = _insert_rc(db, "RC-001")
         b = _insert_rc(db, "RC-002")
-        _add_tags(db, a, ("#", "ml"), ("#", "ai"), ("$", "key"))
-        _add_tags(db, b, ("#", "ml"), ("#", "ai"), ("$", "key"))
+        _add_tags(db, a, ("#", "ml"), ("#", "ai"), ("#", "key"))
+        _add_tags(db, b, ("#", "ml"), ("#", "ai"), ("#", "key"))
         result = find_tag_connections(db, a)
         assert result[0]["strength"] == pytest.approx(3.0)
         assert len(result[0]["shared_tags"]) == 3
+
+    def test_kind_of_note_tags_do_not_link(self, db):
+        """$insight / ?question / !priority say what kind of note it is, not
+        what it is about — sharing one is not a connection (F1)."""
+        a = _insert_rc(db, "RC-001")
+        b = _insert_rc(db, "RC-002")
+        _add_tags(db, a, ("$", "insight"), ("?", "question"), ("!", "priority"))
+        _add_tags(db, b, ("$", "insight"), ("?", "question"), ("!", "priority"))
+        assert find_tag_connections(db, a) == []
 
     def test_sorted_by_strength_descending(self, db):
         a = _insert_rc(db, "RC-001")

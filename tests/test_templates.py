@@ -10,6 +10,7 @@ from ksj_mcp.templates import (
     parse_syn,
     parse_rev,
     parse_dc,
+    parse_iso,
     parse_template,
     _extract_knowledge_status,
 )
@@ -271,6 +272,113 @@ class TestParseDC:
     def test_current_events_absent_when_no_section(self):
         result = parse_dc(self.SAMPLE)
         assert result["current_events"] == ""
+
+
+# ── Section layouts (F2, 2026-09-25 test pass) ────────────────────────────────
+
+class TestSectionLayouts:
+    """Assistants transcribe pages as "Label: value"; hand-written pages use
+    labels alone on a line, with or without a colon, often ALL CAPS. Every
+    layout must yield separate, non-bleeding fields."""
+
+    def test_inline_labels_regression(self):
+        r = parse_rc("RC-900\nTopic: QA\nFirst Impressions: testing ksj\n"
+                     "Key Points: a b\nTags: #x")
+        assert r["first_impressions"] == "testing ksj"
+        assert r["key_points"] == "a b"
+        assert r["tags_raw"] == "#x"
+
+    def test_block_labels_without_colon_regression(self):
+        r = parse_rc("RC-900\nFirst Impressions\ntesting ksj\nKey Points\na b\nTags\n#x")
+        assert r["first_impressions"] == "testing ksj"
+        assert r["key_points"] == "a b"
+        assert r["tags_raw"] == "#x"
+
+    def test_inline_content_continues_on_following_lines(self):
+        r = parse_rc("First Impressions: line one\nline two\nKey Points: kp")
+        assert r["first_impressions"] == "line one\nline two"
+
+    def test_mixed_layouts(self):
+        r = parse_rc("First Impressions:\nblock content\nKey Points: inline kp\n"
+                     "Quick Questions\nwhy?\nTags: #t")
+        assert r["first_impressions"] == "block content"
+        assert r["key_points"] == "inline kp"
+        assert r["quick_questions"] == "why?"
+
+    def test_markdown_bold_and_heading_labels(self):
+        r = parse_rc("**First Impressions:** bold label\n### Key Points\nkp")
+        assert r["first_impressions"] == "bold label"
+        assert r["key_points"] == "kp"
+
+    def test_label_word_inside_prose_is_not_a_label(self):
+        r = parse_rc("First Impressions:\nPoints to consider are many\n"
+                     "my first impressions: mixed\nKey Points:\nkp")
+        assert "Points to consider" in r["first_impressions"]
+        assert "my first impressions" in r["first_impressions"]
+        assert r["key_points"] == "kp"
+
+    def test_bullet_with_label_word_stays_in_section(self):
+        r = parse_rc("Key Points:\n- Notes: bullet stays\n- second")
+        assert "bullet stays" in r["key_points"]
+        assert "second" in r["key_points"]
+
+    def test_metadata_labels_end_a_section(self):
+        r = parse_iso("Subject: exploded view\nDate: 2026-09-01\nNotes: gear train")
+        assert r["subject"] == "exploded view"
+        assert r["notes"] == "gear train"
+
+    def test_unknown_heading_with_colon_ends_section(self):
+        r = parse_rc("Key Points:\n- kp one\nAction Items:\n- do a thing\nTags: #t")
+        assert r["key_points"] == "- kp one"
+
+    def test_line_with_content_after_colon_is_not_a_heading(self):
+        r = parse_rc("First Impressions:\nPhase 4 - Grade -2: (27,3) - 81 dims\nKey Points:\nkp")
+        assert "Grade -2: (27,3)" in r["first_impressions"]
+
+    def test_all_caps_heading_ends_section(self):
+        r = parse_syn("★ BREAKTHROUGH\nthe idea\nAI QUERIES\n? prior art\nTAGS\n#t")
+        assert r["breakthrough"] == "the idea"
+        assert r["tags_raw"] == "#t"
+
+    def test_all_caps_line_with_digits_is_content(self):
+        r = parse_rc("First Impressions:\nIGP24 = 56TH\nKey Points:\nkp")
+        assert "IGP24" in r["first_impressions"]
+
+    def test_inline_tags_line_does_not_swallow_the_page(self):
+        text = ("SPRINT GOALS — May 21, 2026\nTags: #sprint #goals\n\n"
+                "IMMEDIATE (this week):\n- fix the illustrate tool, blocks demos\n")
+        result = parse_template("DC", text)
+        assert result["fields"]["tags_raw"] == "#sprint #goals"
+        values = {t["value"] for t in result["tags"]}
+        assert values == {"sprint", "goals"}
+
+    def test_patterns_discovered_label(self):
+        r = parse_syn("PATTERNS DISCOVERED\n- one\n★ BREAKTHROUGH\nidea")
+        assert r["patterns"] == "- one"
+        assert r["breakthrough"] == "idea"
+
+    def test_crlf_line_endings(self):
+        r = parse_rc("First Impressions: a\r\nKey Points: b\r\n")
+        assert r["first_impressions"] == "a"
+        assert r["key_points"] == "b"
+
+
+class TestSummaryFallback:
+    def test_tags_are_never_the_summary(self):
+        text = "### Phase 54: Structural Flare\n**Tags:**\n#rh #flare"
+        assert parse_template("RC", text)["summary"] == "Phase 54: Structural Flare"
+
+    def test_unlabeled_page_uses_first_content_line(self):
+        text = "RC-003\nCORRECTION to AIEX-933. The v1 dial task was leaky."
+        assert parse_template("RC", text)["summary"].startswith("CORRECTION to AIEX-933")
+
+    def test_metadata_lines_skipped(self):
+        text = "Date: 2026-05-21\nSource: me\nSPRINT GOALS — May 21\nTags: #sprint"
+        assert parse_template("DC", text)["summary"] == "SPRINT GOALS — May 21"
+
+    def test_placeholder_question_not_tagged(self):
+        result = parse_template("RC", "Quick Questions:\n(none)\nTags: #t")
+        assert not any(t["prefix"] == "?" for t in result["tags"])
 
 
 # ── parse_template dispatcher ─────────────────────────────────────────────────

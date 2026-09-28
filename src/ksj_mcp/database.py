@@ -414,7 +414,7 @@ def insert_connection(
     """
     if type_ in ("tag_overlap", "entity_overlap") and source_id > target_id:
         source_id, target_id = target_id, source_id
-    cur = con.execute(
+    row = con.execute(
         """INSERT INTO connections (source_id, target_id, type, strength, method,
                                     relation, note, asserted_by)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -423,14 +423,11 @@ def insert_connection(
                method      = excluded.method,
                relation    = excluded.relation,
                note        = excluded.note,
-               asserted_by = excluded.asserted_by""",
+               asserted_by = excluded.asserted_by
+           RETURNING id""",
         (source_id, target_id, type_, strength, method, relation, note, asserted_by),
-    )
-    row = con.execute(
-        "SELECT id FROM connections WHERE source_id=? AND target_id=? AND type=?",
-        (source_id, target_id, type_),
     ).fetchone()
-    return row["id"] if row else cur.lastrowid
+    return row["id"]
 
 
 def get_capture(con: sqlite3.Connection, capture_id: int) -> dict | None:
@@ -1861,6 +1858,74 @@ def migrate_v37(db_path: Path | None = None) -> bool:
         return True
     finally:
         con.execute("PRAGMA foreign_keys=ON")
+        con.close()
+
+
+_V38_SETTING = "migrated_v38"
+_HANDWRITTEN_TYPES = ("RC", "SYN", "REV", "DC", "ISO")
+
+
+def migrate_v38(db_path: Path | None = None) -> bool:
+    """
+    Server 3.8 migration: re-parse hand-written captures, then (caller) rebuild
+    the connection graph.
+
+      - The section parser now reads "Label: value" on one line, ALL-CAPS and
+        colon-terminated headings, and never uses a tag list as a summary.
+        Stored content_json, summary, and tags of RC/SYN/REV/DC/ISO captures
+        were produced by the old parser, so they are re-derived from
+        COALESCE(corrected_ocr, raw_ocr). AIEX and WA entries are untouched.
+      - The tag-overlap graph is now bounded (connections.py); the caller
+        MUST run rebuild_connections when this returns True, so existing
+        databases shed the old near-complete graph.
+
+    captures.db is first copied to captures.db.bak-v38. Hand-asserted
+    entities (capture_entities) and user-asserted edges are not touched.
+
+    Must run after init_db (it records completion in the settings table).
+    Safe to call on every startup — no-op once applied. Returns True only
+    when the migration actually ran.
+    """
+    from .templates import parse_template  # templates has no package imports
+
+    path = db_path or _DEFAULT_DB
+    if not path.exists():
+        return False
+
+    con = get_connection(path)
+    try:
+        if get_setting(con, _V38_SETTING):
+            return False
+        if con.execute("SELECT COUNT(*) AS n FROM captures").fetchone()["n"] == 0:
+            set_setting(con, _V38_SETTING, datetime.now(timezone.utc).isoformat())
+            con.commit()
+            return False  # fresh DB — nothing to re-parse or rebuild
+
+        # Flush WAL so the file copy is a complete backup.
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        shutil.copy2(path, path.with_name(path.name + ".bak-v38"))
+
+        placeholders = ",".join("?" * len(_HANDWRITTEN_TYPES))
+        rows = con.execute(
+            f"""SELECT id, type, COALESCE(corrected_ocr, raw_ocr) AS body
+                FROM captures WHERE type IN ({placeholders})""",
+            _HANDWRITTEN_TYPES,
+        ).fetchall()
+        for r in rows:
+            parsed = parse_template(r["type"], r["body"] or "")
+            con.execute(
+                "UPDATE captures SET content_json=?, summary=? WHERE id=?",
+                (json.dumps(parsed["fields"]), parsed["summary"], r["id"]),
+            )
+            con.execute("DELETE FROM tags WHERE capture_id=?", (r["id"],))
+            insert_tags(con, r["id"], parsed["tags"])
+        set_setting(con, _V38_SETTING, datetime.now(timezone.utc).isoformat())
+        con.commit()
+        return True
+    except Exception:
+        con.rollback()
+        raise
+    finally:
         con.close()
 
 

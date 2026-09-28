@@ -129,32 +129,137 @@ def extract_schema_tags(text: str, template_type: str = "") -> list[dict[str, st
 
 # ── Section splitter helper ───────────────────────────────────────────────────
 
+# Every label that can open a section on any template, plus the metadata
+# labels written above the sections (Date, Source, Subject...). A section
+# ends at the next line that starts with ANY of these, so a stray metadata
+# line never leaks into the field before it.
+_KNOWN_HEADERS: tuple[str, ...] = (
+    # RC
+    "first impressions", "impressions", "key points", "key point", "points",
+    "quick questions",
+    # SYN
+    "★ breakthrough", "breakthrough", "★", "patterns discovered",
+    "patterns identified", "patterns", "pattern",
+    "connections", "connection",
+    # REV
+    "process notes", "process", "observations", "observation",
+    "knowledge status",
+    # DC
+    "dream narrative", "narrative", "dream", "symbols", "symbol",
+    "emotions", "emotion", "current events", "yesterday",
+    # ISO
+    "subject", "title", "notes", "note", "description", "caption",
+    # All templates (Action Items is written on RC pages even though the
+    # parser doesn't keep it as a field; it must still end Key Points)
+    "tags", "tag", "action items", "action item", "insights",
+    # Metadata labels
+    "date", "source(s)", "sources", "source", "topic", "session focus", "focus",
+    "volume", "page",
+)
+
+# Optional markdown decoration before a label: "**Key Points:**", "### Tags".
+# Bullets ("-", "•") are deliberately excluded — "- Notes: x" is a list item.
+_LABEL_LEAD = r'[ \t]*(?:[*_#>]+[ \t]*)?'
+
+
+def _label_regex(header: str) -> str:
+    """
+    Regex for *header* used as a label at the start of a line.
+
+    A word label must be followed by a delimiter (":", "-", "–", "—") or the
+    end of the line, so prose that merely begins with the word ("Points to
+    consider...") is not a label. Symbol labels ("★") need no delimiter.
+    """
+    word = re.escape(header)
+    if header[0].isalnum():
+        tail = r'[ \t]*(?:[*_]+[ \t]*)?(?:[:\-–—][ \t]*(?:[*_]+[ \t]*)?|(?=\n|\Z))'
+    else:
+        tail = r'[ \t]*(?:[:\-–—][ \t]*)?'
+    return rf'{_LABEL_LEAD}{word}{tail}'
+
+
+# A section also ends at a heading line of its own — a short label ending in
+# ":" with nothing after it ("Action Items:", "Patterns identified:",
+# "IMMEDIATE (this week):", "**Insights:**"). Hand-written pages carry many
+# labels no parser knows; this is what keeps them out of the section above.
+# A line with content after its colon ("Phase 4 - Grade -2: (27,3)") is not
+# a heading.
+_HEADING_LINE = r'[ \t]*(?:[*_#>]+[ \t]*)?[\w$?★][^\n:]{0,60}:[ \t]*(?:[*_]+[ \t]*)?(?=\n|\Z)'
+
+# Hand-written headings are often ALL CAPS with no colon ("AI QUERIES",
+# "NEXT STEPS"). Letters only — a line with digits ("IGP24 = 56TH") is content.
+_CAPS_HEADING_LINE = r"(?-i:[ \t]*[A-Z][A-Z &/()'’-]{3,40}[ \t]*(?=\n|\Z))"
+
+_ANY_LABEL = re.compile(
+    r'(?im)^(?:'
+    + "|".join(_label_regex(h) for h in sorted(_KNOWN_HEADERS, key=len, reverse=True))
+    + r'|' + _HEADING_LINE
+    + r'|' + _CAPS_HEADING_LINE
+    + r')'
+)
+
+
 def _extract_section(text: str, *headers: str) -> str:
     """
-    Extract text between a section header and the next header or end of string.
-    Case-insensitive. Returns the first matching section, stripped.
+    Extract the content of the section introduced by the first of *headers*
+    found as a line-start label (case-insensitive).
+
+    Content may start on the label's own line ("Key Points: a, b") or on the
+    lines below it, and runs until the next line that starts with any known
+    label (_KNOWN_HEADERS) or the end of the text. Returns "" when no header
+    is found.
     """
+    text = text.replace("\r\n", "\n")
     for header in headers:
-        pattern = re.compile(
-            rf'(?i){re.escape(header)}\s*[:\-]?\s*\n(.*?)(?=\n[A-Z][A-Z ]+[:\-]|\Z)',
-            re.DOTALL,
-        )
-        m = pattern.search(text)
-        if m:
-            return m.group(1).strip()
+        m = re.search(rf'(?im)^{_label_regex(header)}', text)
+        if not m:
+            continue
+        rest = text[m.end():]
+        nl = rest.find("\n")
+        stop = _ANY_LABEL.search(rest, nl + 1) if nl != -1 else None
+        return (rest[:stop.start()] if stop else rest).strip()
     return ""
 
 
-def _build_summary(fields: dict[str, Any], max_len: int = 200) -> str:
-    """Build a one-line summary from the most informative field."""
+# Fields that list tags or links — never a summary of the page.
+_NON_SUMMARY_FIELDS = {"tags_raw", "connections_raw"}
+
+_TEMPLATE_ID_LINE = re.compile(r'^(RC|SYN|REV|DC|ISO|WA|AIEX)-?\d{1,4}[a-z]?\b', re.IGNORECASE)
+
+
+def _first_content_line(raw_text: str) -> str:
+    """First line of *raw_text* that says something: not blank, not a bare
+    template ID, not a metadata/section label. Markdown heading and bold
+    markers are stripped."""
+    for line in raw_text.replace("\r\n", "\n").split("\n"):
+        s = line.strip()
+        if not s or _ANY_LABEL.match(line):
+            continue
+        s = re.sub(r'^[#>*_\s]+', '', s).replace("**", "").strip()
+        if not s or (_TEMPLATE_ID_LINE.match(s) and len(s) <= 12):
+            continue
+        return s
+    return ""
+
+
+def _build_summary(fields: dict[str, Any], raw_text: str = "", max_len: int = 200) -> str:
+    """
+    Build a one-line summary from the most informative field.
+
+    Order: the template's lead field (First Impressions, Breakthrough, ...),
+    then any other content field, then the first meaningful line of the page.
+    Tag and connection lists are never used — a list of tags is not a summary.
+    """
     for key in ("first_impressions", "breakthrough", "process_notes", "dream_narrative",
                 "subject"):
         val = fields.get(key, "").strip()
         if val:
             return val[:max_len].replace("\n", " ")
-    # Fallback: join non-empty fields
-    parts = [v for v in fields.values() if isinstance(v, str) and v.strip()]
-    return " | ".join(parts)[:max_len]
+    parts = [v for k, v in fields.items()
+             if k not in _NON_SUMMARY_FIELDS and isinstance(v, str) and v.strip()]
+    if parts:
+        return " | ".join(parts)[:max_len].replace("\n", " ")
+    return _first_content_line(raw_text)[:max_len]
 
 
 # ── Per-template parsers ──────────────────────────────────────────────────────
@@ -173,7 +278,8 @@ def parse_syn(text: str) -> dict[str, Any]:
     """Parse a Synthesis (SYN) page."""
     return {
         "breakthrough": _extract_section(text, "breakthrough", "★ breakthrough", "★"),
-        "patterns": _extract_section(text, "patterns", "pattern"),
+        "patterns": _extract_section(text, "patterns", "pattern", "patterns discovered",
+                                     "patterns identified"),
         "connections_raw": _extract_section(text, "connections", "connection"),
         "tags_raw": _extract_section(text, "tags", "tag"),
     }
@@ -281,6 +387,9 @@ _PARSERS = {
 }
 
 
+_PLACEHOLDERS = {"none", "n/a", "na", "nil", "tbd", ""}
+
+
 def _positional_tags(
     fields: dict[str, Any],
     template_type: str,
@@ -297,6 +406,8 @@ def _positional_tags(
     extra: list[dict[str, str]] = []
 
     def _add(prefix: str, raw: str) -> None:
+        if raw.strip("()[]-. ").casefold() in _PLACEHOLDERS:
+            return  # "(none)", "n/a" — an empty section, not a tag
         value = normalize_tag_value(raw)
         if not value or (prefix, value) in seen:
             return
@@ -350,7 +461,7 @@ def parse_template(template_type: str, raw_text: str) -> dict[str, Any]:
     tags = extract_schema_tags(raw_text, template_type)
     seen = {(t["prefix"], t["value"]) for t in tags}
     tags.extend(_positional_tags(fields, template_type, seen))
-    summary = _build_summary(fields)
+    summary = _build_summary(fields, raw_text)
 
     return {
         "fields": fields,

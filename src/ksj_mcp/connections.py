@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from .database import get_connections, insert_connection
+from .templates import assign_role
 
 # Matches @RC-001, @SYN-003, @REV-002, @DC-004, @ISO-001, @WA-007 etc.
 _REF_PATTERN = re.compile(
@@ -22,76 +23,129 @@ _REF_PATTERN = re.compile(
 )
 
 
-def find_tag_connections(con: sqlite3.Connection, capture_id: int) -> list[dict]:
+# ── Tag-overlap graph shape ───────────────────────────────────────────────────
+#
+# Linking every pair that shares any tag made the graph nearly complete
+# (2026-09-25: 347,747 edges over 1,021 captures, 67% of all pairs) — a tag
+# half the journal carries says nothing about two captures in particular.
+# The graph is now bounded:
+#
+#   - Tags that name the KIND of note rather than its subject ($insight,
+#     ?question, !priority) never create edges. Selected by role, not by
+#     prefix: on DC pages "!" is a dream motif, which is topical.
+#   - Each capture keeps at most TAG_LINKS_PER_CAPTURE tag edges. Candidates
+#     sharing a RARE tag (on <= max(RARE_TAG_FLOOR, RARE_TAG_MAX_FRACTION*N)
+#     captures) rank first; candidates sharing only common tags fill the
+#     remaining slots, strongest first, then nearest in time. A capture
+#     tagged only #rh-investigation links to its neighbours in that thread
+#     rather than to all 500 other entries — or to none.
+#   - An edge exists when it is in either endpoint's top list.
+
+TAG_LINKS_PER_CAPTURE = 25
+RARE_TAG_MAX_FRACTION = 0.10
+RARE_TAG_FLOOR = 10
+NON_LINKING_ROLES = frozenset({"insight", "question", "priority"})
+
+
+def _tag_role(prefix: str, value: str, role: str | None) -> str:
+    """Stored role, or the RC/SYN/REV meaning of the prefix for legacy rows."""
+    return role if role else assign_role(prefix, value)
+
+
+def _parse_ts(value: str | None) -> float:
+    try:
+        return datetime.fromisoformat(value).timestamp() if value else 0.0
+    except ValueError:
+        return 0.0
+
+
+class _TagIndex:
     """
-    Find other captures that share at least one schema tag with *capture_id*.
+    Every linking tag in the base, loaded in one pass: which captures carry
+    each tag, its IDF weight, and whether it is rare. Built per call — a few
+    thousand rows — so single-capture and full-rebuild paths share one
+    scoring rule.
+    """
+
+    def __init__(self, con: sqlite3.Connection):
+        self.total = con.execute("SELECT COUNT(*) AS n FROM captures").fetchone()["n"]
+        self.members: dict[tuple[str, str], set[int]] = {}
+        self.tags_of: dict[int, list[tuple[str, str]]] = {}
+        for r in con.execute(
+            "SELECT capture_id, prefix, value, role FROM tags "
+            "WHERE role IS NULL OR role != 'entity'"
+        ):
+            if _tag_role(r["prefix"], r["value"], r["role"]) in NON_LINKING_ROLES:
+                continue
+            key = (r["prefix"], r["value"])
+            cids = self.members.setdefault(key, set())
+            if r["capture_id"] not in cids:
+                cids.add(r["capture_id"])
+                self.tags_of.setdefault(r["capture_id"], []).append(key)
+        rare_limit = max(RARE_TAG_FLOOR, RARE_TAG_MAX_FRACTION * self.total)
+        self.idf = {
+            k: math.log2(1 + self.total / max(len(c), 1)) for k, c in self.members.items()
+        }
+        self.rare = {k: len(c) <= rare_limit for k, c in self.members.items()}
+        self.created = {
+            r["id"]: _parse_ts(r["created_at"])
+            for r in con.execute("SELECT id, created_at FROM captures")
+        }
+
+    def ranked(self, capture_id: int, limit: int | None) -> list[dict]:
+        """Tag-overlap candidates for *capture_id*, best first, capped at *limit*."""
+        acc: dict[int, list] = {}
+        for key in self.tags_of.get(capture_id, []):
+            weight, rare = self.idf[key], self.rare[key]
+            label = f"{key[0]}{key[1]}"
+            for other in self.members[key]:
+                if other == capture_id:
+                    continue
+                e = acc.get(other)
+                if e is None:
+                    e = acc[other] = [0.0, False, []]
+                e[0] += weight
+                e[1] = e[1] or rare
+                e[2].append(label)
+        mine = self.created.get(capture_id, 0.0)
+        order = sorted(
+            acc.items(),
+            key=lambda kv: (not kv[1][1], -kv[1][0],
+                            abs(self.created.get(kv[0], 0.0) - mine), kv[0]),
+        )
+        if limit is not None:
+            order = order[:limit]
+        return [
+            {
+                "target_id":    cid,
+                "strength":     round(s, 2),
+                "shared_tags":  tags,
+                "shared_count": len(tags),
+                "rare":         rare,
+            }
+            for cid, (s, rare, tags) in order
+        ]
+
+
+def find_tag_connections(
+    con: sqlite3.Connection,
+    capture_id: int,
+    limit: int | None = TAG_LINKS_PER_CAPTURE,
+) -> list[dict]:
+    """
+    Find the captures *capture_id* should link to by shared schema tags.
 
     Strength is inverse-document-frequency weighted: each shared tag
     contributes log2(1 + N/df), where N is the total capture count and df
-    the number of captures carrying that tag. A ubiquitous tag contributes
-    ~1.0; a rare one contributes much more.
+    the number of captures carrying that tag. See the graph-shape notes
+    above for which tags link and how candidates are ranked and capped.
+    Pass limit=None for every candidate.
 
-    Returns list of dicts sorted by strength (descending):
+    Returns list of dicts, best first:
       {"target_id": int, "strength": float, "shared_tags": [str],
-       "shared_count": int}
+       "shared_count": int, "rare": bool}
     """
-    # Get tags for this capture. Entity-role tags are excluded — shared
-    # entities get their own (higher-ranked) entity_overlap edges, and
-    # counting them here would double-weight them.
-    rows = con.execute(
-        """SELECT prefix, value FROM tags
-           WHERE capture_id=? AND (role IS NULL OR role != 'entity')""",
-        (capture_id,),
-    ).fetchall()
-    if not rows:
-        return []
-
-    my_tags = [(r["prefix"], r["value"]) for r in rows]
-    total = con.execute("SELECT COUNT(*) AS n FROM captures").fetchone()["n"]
-
-    placeholders = ",".join("(?,?)" for _ in my_tags)
-    flat_params = [x for pair in my_tags for x in pair]
-
-    # Document frequency per tag (how many captures carry it)
-    df_rows = con.execute(
-        f"""SELECT prefix, value, COUNT(DISTINCT capture_id) AS df
-            FROM tags
-            WHERE (prefix, value) IN ({placeholders})
-            GROUP BY prefix, value""",
-        flat_params,
-    ).fetchall()
-    idf = {
-        (r["prefix"], r["value"]): math.log2(1 + total / max(r["df"], 1))
-        for r in df_rows
-    }
-
-    # Find all other captures sharing any of these tags
-    candidates = con.execute(
-        f"""SELECT capture_id, prefix, value
-            FROM tags
-            WHERE (prefix, value) IN ({placeholders})
-              AND capture_id != ?""",
-        flat_params + [capture_id],
-    ).fetchall()
-
-    # Accumulate IDF-weighted overlap per candidate
-    overlap: dict[int, dict] = {}
-    for row in candidates:
-        cid = row["capture_id"]
-        key = (row["prefix"], row["value"])
-        entry = overlap.setdefault(cid, {"tags": [], "strength": 0.0})
-        entry["tags"].append(f"{row['prefix']}{row['value']}")
-        entry["strength"] += idf.get(key, 1.0)
-
-    return [
-        {
-            "target_id":    cid,
-            "strength":     round(e["strength"], 2),
-            "shared_tags":  e["tags"],
-            "shared_count": len(e["tags"]),
-        }
-        for cid, e in sorted(overlap.items(), key=lambda x: -x[1]["strength"])
-    ]
+    return _TagIndex(con).ranked(capture_id, limit)
 
 
 def find_entity_connections(con: sqlite3.Connection, capture_id: int) -> list[dict]:
@@ -184,19 +238,37 @@ def find_reference_connections(
     return refs
 
 
+def _template_ids(con: sqlite3.Connection, ids: list[int]) -> dict[int, str]:
+    """template_id for each of *ids*, in one query."""
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    return {
+        r["id"]: r["template_id"]
+        for r in con.execute(
+            f"SELECT id, template_id FROM captures WHERE id IN ({placeholders})", ids
+        )
+    }
+
+
 def build_connections(con: sqlite3.Connection, capture_id: int) -> list[dict]:
     """
-    Run both detection methods for *capture_id*, persist new connections,
+    Run every detection method for *capture_id*, persist new connections,
     and return a combined list of all connections for this capture.
 
     Each returned dict:
       {"type": str, "method": str, "strength": float, "connected_id": int,
        "connected_template": str, "shared_tags": list[str]}
     """
+    tag_links = find_tag_connections(con, capture_id)
+    entity_links = find_entity_connections(con, capture_id)
+    templates = _template_ids(
+        con, [t["target_id"] for t in tag_links] + [e["target_id"] for e in entity_links]
+    )
     results = []
 
     # Tag overlap
-    for tc in find_tag_connections(con, capture_id):
+    for tc in tag_links:
         conn_id = insert_connection(
             con,
             source_id=capture_id,
@@ -205,21 +277,18 @@ def build_connections(con: sqlite3.Connection, capture_id: int) -> list[dict]:
             strength=tc["strength"],
             method="tag_overlap",
         )
-        target_row = con.execute(
-            "SELECT template_id FROM captures WHERE id=?", (tc["target_id"],)
-        ).fetchone()
         results.append({
             "connection_id": conn_id,
             "type": "tag_overlap",
             "method": "tag_overlap",
             "strength": tc["strength"],
             "connected_id": tc["target_id"],
-            "connected_template": target_row["template_id"] if target_row else "?",
+            "connected_template": templates.get(tc["target_id"], "?"),
             "shared_tags": tc["shared_tags"],
         })
 
     # Entity co-occurrence (ranked above tag overlap at read time)
-    for ec in find_entity_connections(con, capture_id):
+    for ec in entity_links:
         conn_id = insert_connection(
             con,
             source_id=capture_id,
@@ -228,16 +297,13 @@ def build_connections(con: sqlite3.Connection, capture_id: int) -> list[dict]:
             strength=ec["strength"],
             method="entity_overlap",
         )
-        target_row = con.execute(
-            "SELECT template_id FROM captures WHERE id=?", (ec["target_id"],)
-        ).fetchone()
         results.append({
             "connection_id": conn_id,
             "type": "entity_overlap",
             "method": "entity_overlap",
             "strength": ec["strength"],
             "connected_id": ec["target_id"],
-            "connected_template": target_row["template_id"] if target_row else "?",
+            "connected_template": templates.get(ec["target_id"], "?"),
             "shared_tags": [f"@{n}" for n in ec["shared_entities"]],
         })
 
@@ -276,20 +342,71 @@ def rebuild_connections(con: sqlite3.Connection) -> dict:
     tags and text; user-asserted edges are never touched — they are
     deliberate human statements, not derivable data.
 
-    Returns {"captures": int, "edges": int, "references": int}.
+    Runs as ONE transaction with bulk inserts: each unordered pair is written
+    once, and other ksj processes sharing the database see either the old
+    graph or the new one, never a half-built one.
+
+    Returns {"captures", "edges", "tag_overlap", "entity_overlap",
+             "references", "asserted"} counts.
     """
-    con.execute("DELETE FROM connections WHERE asserted_by != 'user'")
-    con.commit()
+    ids = [r["id"] for r in con.execute("SELECT id FROM captures ORDER BY id")]
+    index = _TagIndex(con)
 
-    ids = [r["id"] for r in con.execute("SELECT id FROM captures").fetchall()]
-    for cid in ids:
-        build_connections(con, cid)
+    tag_edges: dict[tuple[int, int], float] = {}
+    for cid in index.tags_of:
+        for link in index.ranked(cid, TAG_LINKS_PER_CAPTURE):
+            tag_edges[(min(cid, link["target_id"]), max(cid, link["target_id"]))] = link["strength"]
 
-    edges = con.execute("SELECT COUNT(*) AS n FROM connections").fetchone()["n"]
-    refs = con.execute(
-        "SELECT COUNT(*) AS n FROM connections WHERE type='reference'"
-    ).fetchone()["n"]
-    return {"captures": len(ids), "edges": edges, "references": refs}
+    entity_edges: dict[tuple[int, int], float] = {}
+    entity_holders = [
+        r["capture_id"]
+        for r in con.execute("SELECT DISTINCT capture_id FROM capture_entities")
+    ]
+    for cid in entity_holders:
+        for link in find_entity_connections(con, cid):
+            entity_edges[(min(cid, link["target_id"]), max(cid, link["target_id"]))] = link["strength"]
+
+    reference_edges = {
+        (cid, ref["target_id"]): ref["strength"]
+        for cid in ids
+        for ref in find_reference_connections(con, cid)
+        if ref["target_id"] != cid
+    }
+
+    upsert = (
+        "INSERT INTO connections (source_id, target_id, type, strength, method) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(source_id, target_id, type) DO UPDATE SET "
+        "strength = excluded.strength, method = excluded.method"
+    )
+    con.commit()  # close any implicit transaction before taking the write lock
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("DELETE FROM connections WHERE asserted_by != 'user'")
+        for type_, edges in (("tag_overlap", tag_edges),
+                             ("entity_overlap", entity_edges),
+                             ("reference", reference_edges)):
+            con.executemany(
+                upsert,
+                [(a, b, type_, s, type_) for (a, b), s in edges.items()],
+            )
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+
+    counts = {
+        r["type"]: r["n"]
+        for r in con.execute("SELECT type, COUNT(*) AS n FROM connections GROUP BY type")
+    }
+    return {
+        "captures":       len(ids),
+        "edges":          sum(counts.values()),
+        "tag_overlap":    counts.get("tag_overlap", 0),
+        "entity_overlap": counts.get("entity_overlap", 0),
+        "references":     counts.get("reference", 0),
+        "asserted":       counts.get("asserted", 0),
+    }
 
 
 def find_unapplied(con: sqlite3.Connection, capture_id: int, limit: int = 5) -> list[dict]:
