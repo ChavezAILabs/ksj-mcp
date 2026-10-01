@@ -8,7 +8,7 @@
 
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
-**Current release: ksj-mcp v3.9.0** · built on **MCP SDK v2.0.0**
+**Current release: ksj-mcp v3.9.0** · built on the official **Python MCP SDK 2.x**
 
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
 
@@ -129,7 +129,7 @@ This server uses **MCP (Model Context Protocol)**, an open standard with growing
 **Using ChatGPT, Gemini, or another platform?**
 Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, then paste it into your AI assistant of choice. Full native MCP support for additional platforms is on the roadmap as the ecosystem grows.
 
-**Protocol compliance:** ksj-mcp runs on the official Python MCP SDK v2.0.0 over the stdio transport. The server is dual-era: it answers the classic `initialize` handshake (negotiated up to protocol revision `2025-11-25`), and a client that opens with the `2026-07-28` per-request envelope gets the modern era, including `server/discover`. Which era is used is the client's choice. Since v3.7.0 the server answers the handshake before it opens your knowledge base, so startup time no longer grows with the size of your journal. Since v3.9.0 the `ksj-mcp` command is a small launcher that answers the handshake from a cache written by the previous run (`handshake-cache.json` in the data directory) while the full server loads, so ksj connects even on a slow or busy machine; the first start after an install or upgrade fills the cache. Set `KSJ_FAST_HANDSHAKE=0` to run the server directly. (MCP is versioned by dated spec release, not semantic version — "MCP SDK v2.0.0" above refers to the SDK package's own version number, not the protocol revision.)
+**Protocol compliance:** ksj-mcp runs on the official Python MCP SDK 2.x (2.0.0 or later) over the stdio transport. The server is dual-era: it answers the classic `initialize` handshake (negotiated up to protocol revision `2025-11-25`), and a client that opens with the `2026-07-28` per-request envelope gets the modern era, including `server/discover`. Which era is used is the client's choice. Since v3.7.0 the server answers the handshake before it opens your knowledge base, so startup time no longer grows with the size of your journal. Since v3.9.0 the `ksj-mcp` command is a small launcher that answers the handshake from a cache written by the previous run (`handshake-cache.json` in the data directory) while the full server loads, so ksj connects even on a slow or busy machine; the first start after an install or upgrade fills the cache. Set `KSJ_FAST_HANDSHAKE=0` to run the server directly. (MCP is versioned by dated spec release, not semantic version — "MCP SDK 2.x" above refers to the SDK package's own version number, not the protocol revision.)
 
 ---
 
@@ -156,36 +156,55 @@ For other MCP clients, consult their documentation for how to register a local M
 | **Windows** | `winget install astral-sh.uv` or [download from astral.sh/uv](https://astral.sh/uv) |
 | **macOS/Linux** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 
-Verify with `uv --version` in a terminal before continuing.
+Open a **new** terminal after installing uv, then verify with `uv --version`
+before continuing.
 
 **Install the KSJ server** (run once in a terminal):
 
 ```bash
-uv tool install --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
+uv tool install --compile-bytecode --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
 ```
 
-This installs `ksj-mcp` as a persistent command on your machine. Git must be installed for this step (Windows: [Git for Windows](https://git-scm.com/download/win)).
+This installs `ksj-mcp` as a persistent command on your machine. Git must be
+installed for this step (Windows: [Git for Windows](https://git-scm.com/download/win)).
+`--compile-bytecode` precompiles the server and its libraries at install
+time, so the first launch isn't slowed by compiling them.
 
 Verify with `uv tool list` — it should list `ksj-mcp` with a version number.
 
 **To update later:**
-```bash
-uv tool install --reinstall --compile-bytecode --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
-```
-`--reinstall` matters: a plain `uv tool install` silently does nothing when the
-version number hasn't changed. `--compile-bytecode` precompiles the server and
-its libraries at install time, so the first launch afterwards isn't slowed by
-compiling them (measured ~0.8 s faster on Linux; more on Windows). Fully quit
-and reopen your AI client afterwards, then ask it to run `get_version`.
+
+1. **Fully quit your AI client first** — on Windows, close Claude Desktop from
+   the system tray too, not just the window. The client keeps the `ksj-mcp`
+   program open, and the update then fails with *"Failed to install
+   entrypoint … being used by another process (os error 32)"*.
+2. Run:
+   ```bash
+   uv tool install --reinstall --compile-bytecode --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
+   ```
+   `--reinstall` matters: a plain `uv tool install` silently does nothing when
+   the version number hasn't changed.
+3. Reopen your AI client and ask it to run `get_version`.
+
+The first start after an install or update is the slow one: the server loads
+its libraries from scratch and saves its handshake answers for next time (see
+[Troubleshooting](#troubleshooting) if it times out). Every start after that
+connects in seconds.
 
 ### Step 3 — Register the server
 
-**Claude Desktop config file location:**
+**Claude Desktop:** open **Settings → Developer → Edit Config** — that opens
+the right file for you. Or find it directly:
 
 | Platform | Path |
 |----------|------|
 | **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` |
-| **macOS/Linux** | `~/.config/claude/claude_desktop_config.json` |
+| **macOS** | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+> **Edit the file only while Claude Desktop is fully quit** (Windows: also
+> quit it from the system tray). Claude Desktop saves its own settings to this
+> same file when it quits, and can overwrite changes you made while it was
+> running.
 
 Claude Desktop launches MCP servers with a limited `PATH`, so a bare
 `"ksj-mcp"` command often won't resolve even though it works fine in a
@@ -209,7 +228,21 @@ Add the following block (Windows example shown — swap in your macOS/Linux path
 }
 ```
 
-Save and restart your AI client. You should see **ksj** listed in the tools/integrations panel.
+If the file already has an `mcpServers` block, add the `"ksj": { … }` entry
+inside it rather than adding a second block. Save, then start Claude Desktop.
+**ksj** should appear under **Settings → Developer** with status *running*,
+and in the chat's connectors/tools menu. Ask your assistant to run
+`get_version` to confirm.
+
+**Claude Code** (terminal or IDE) — one command registers ksj for all your
+projects:
+
+```bash
+claude mcp add --scope user ksj -- C:\Users\<you>\.local\bin\ksj-mcp.exe
+```
+
+(macOS: use the full path from the table above.) Check it with
+`claude mcp get ksj`; it should say *Connected*.
 
 ### Optional: offline OCR (Tesseract)
 
@@ -343,7 +376,15 @@ Once connected, talk to your AI assistant naturally.
 
 ## Available tools
 
-37 tools. All 36 tools that existed at v3.6.0 were individually exercised (real-data and bad-input cases) as part of the v3.6.0 ship-readiness pass. One scaling issue was found and fixed during the pass: `export_study_deck` on a very large knowledge base could join far too many connected insights into a single flashcard — now ranked by connection strength and capped.
+37 tools. All of them were exercised against a real 1,000-capture journal (real-data and bad-input cases) in the 3.7 test pass on 2026-09-25; the fixes it led to shipped in 3.8 and 3.9.
+
+**How connections work.** Captures are linked four ways: an `@RC-012`-style
+reference written on the page, a named entity they share, a relationship you
+asserted by hand (`assert_connection`), or shared topic tags. Tag links are
+kept useful by two rules: tags that name the *kind* of note (`$insight`,
+`?question`, `!priority`) never create links on their own, and each capture
+keeps at most its 25 best tag links — links through a rare tag first, then the
+strongest, then the nearest in time.
 
 ### Journal tools
 
@@ -359,7 +400,7 @@ Once connected, talk to your AI assistant naturally.
 | `set_volume` | Multiple journals: set which book new captures go into and which books search sees |
 | `assert_entity` | Link a named entity (person, place, work, dream symbol) to a capture |
 | `assert_connection` | Assert that one capture supersedes / refutes / narrows / supports / distills / assesses / observes / develops another (`develops`: a journal entry that works out an idea first scribbled in a loose capture) — superseded claims are kept in history but leave current search |
-| `rebuild_connections` | Re-derive the connection graph from current tags and text (asserted edges are never touched) |
+| `rebuild_connections` | Re-derive the connection graph from current tags and text, and report the link counts by type (asserted edges are never touched). Seconds, even on a large journal |
 | `find_path` | Shortest chain of connections between two captures |
 | `neighborhood` | Everything within N hops of a capture — its local knowledge cluster |
 | `lint` | Health check: orphan captures, un-closed superseded claims, unresolved contradictions, stale open questions, fragmented tags |
@@ -368,7 +409,7 @@ Once connected, talk to your AI assistant naturally.
 | `export_html` | Self-contained, offline HTML view — timeline with date search and load-more, tag/entity index, per-capture connection lists, and an ego-centric connection graph; in-page and browser Back both step through views; footer records versions, export time, and counts. Opens in any browser |
 | `search_captures` | Full-text search with optional tag, date, entry type, and Wild Art reason filters |
 | `list_by_tag` | Browse captures by tag or prefix — or by entry type / Wild Art reason, e.g. the whole Wild Art queue |
-| `find_connections` | Show tag-overlap and `@`-reference connections for a capture |
+| `find_connections` | Show a capture's connections, ranked: asserted relationships, `@` references, shared entities, then its best tag links |
 | `get_stats` | Overview: counts, top tags, open questions, insights, date range, Wild Art split into "needs attention" and loose captures |
 | `export_captures` | Dump your knowledge base as Markdown or JSON |
 | `suggest_synthesis` | Find RC topic clusters ready to become a SYN entry |
@@ -431,6 +472,15 @@ Three things the server does with these automatically:
 - **Tag bubbles.** Anything written inside the printed tag bubbles counts as
   a tag, with or without the `#`. `DOG MAN`, `Dog-Man`, and `DOG-MAN` all
   normalize to the same tag.
+- **Connections.** Topic tags (`#`), entities (`@`), dream motifs and sensory
+  details link captures. `$`, `?` and `!` on RC/SYN/REV pages mark what *kind*
+  of note something is, so they're searchable and counted but don't link two
+  captures by themselves.
+
+**Page layout.** Write field labels the way the page prints them — on their
+own line or with the content after a colon (`Key Points: …`) both work, as do
+extra headings of your own (`Action Items:`, `NEXT STEPS`). Each section runs
+until the next label.
 
 ---
 
@@ -509,6 +559,35 @@ The page ID is already taken, so the new page was kept as Wild Art and the origi
 
 If it's a page from a new journal, or its ID was misread, file it with `promote_capture` instead.
 
+**"ksj didn't respond within a minute" / "Couldn't start … Request timed out"**
+The server took too long to start. This is expected **once, right after an
+install or update**: the server loads its libraries from scratch and saves
+its handshake answers for next time. Quit and reopen your AI client once more
+and it should connect in seconds. If it keeps timing out:
+
+- Check how busy the machine is. On a low-power laptop, cloud-sync catch-up
+  (OneDrive, Google Drive), a heavy background job, or right after a reboot can
+  push startup past the client's limit. Let it settle and restart the client.
+- Some antivirus products scan every Python file on each start. Excluding the
+  uv tools folder from real-time scanning (Windows:
+  `%APPDATA%\uv\tools`; macOS: `~/.local/share/uv/tools`) can cut startup
+  sharply. That's a security setting — your call.
+- Read the server log (below) for the actual error.
+
+**Where the logs are (Claude Desktop):**
+
+| Platform | Log file |
+|----------|------|
+| **Windows** | `%LOCALAPPDATA%\Claude\logs\mcp-server-ksj.log` (older versions: `%APPDATA%\Claude\logs\`) |
+| **macOS** | `~/Library/Logs/Claude/mcp-server-ksj.log` |
+
+**"Failed to install entrypoint … being used by another process (os error 32)"**
+Windows, during an install or update: your AI client still has the server
+open. Fully quit it (including from the system tray) and run the command again.
+The library part of the update may already have succeeded, so the next start
+can run the new version anyway, but re-run the command so uv's own record of
+the install is correct.
+
 **"Server transport closed unexpectedly" / server not starting**
 Run `uv tool list` in a terminal — it should list `ksj-mcp` with a version number. If it's missing, re-run the install command from Step 2. If it's installed, the issue is likely the Claude Desktop config — double-check it is valid JSON and that `command` is the **full path** to the `ksj-mcp` binary (see [Step 3](#step-3--register-the-server)), not just `"ksj-mcp"`.
 
@@ -528,15 +607,20 @@ All your captures are stored locally in `~/.ksj-mcp/`:
 
 **Files:**
 ```
-~/.ksj-mcp/captures.db     (SQLite database — all your captures and tags)
-~/.ksj-mcp/images/         (copies of uploaded journal photos)
+~/.ksj-mcp/captures.db             (SQLite database — all your captures and tags)
+~/.ksj-mcp/images/                 (copies of uploaded journal photos)
+~/.ksj-mcp/handshake-cache.json    (saved startup answers; safe to delete — rebuilt on the next start)
+~/.ksj-mcp/captures.db.bak-v*      (automatic backups made before upgrades — see below)
 ```
 
 Your data is never sent anywhere and persists across updates. Schema
 upgrades run automatically in the background right after the server starts,
-and tools wait for them to finish. Before a schema change, your database is
-backed up in the same folder: to `captures.db.bak-v3` before the first 3.0
-start, and to `captures.db.bak-v37` before the first 3.7 start.
+and tools wait for them to finish. Before an upgrade changes your stored data,
+your database is backed up in the same folder: to `captures.db.bak-v3` before
+the first 3.0 start, `captures.db.bak-v37` before the first 3.7 start, and
+`captures.db.bak-v38` before the first 3.8 start (which re-reads hand-written
+pages with the improved parser and rebuilds the connection graph). Once you've
+checked the upgraded journal, old backups can be deleted.
 
 **Custom location:** Set the `KSJ_DATA_DIR` environment variable in your config to store data elsewhere:
 
