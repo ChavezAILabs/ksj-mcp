@@ -8,7 +8,7 @@
 
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
-**Current release: ksj-mcp v3.8.0** · built on **MCP SDK v2.0.0**
+**Current release: ksj-mcp v3.9.0** · built on **MCP SDK v2.0.0**
 
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
 
@@ -129,7 +129,7 @@ This server uses **MCP (Model Context Protocol)**, an open standard with growing
 **Using ChatGPT, Gemini, or another platform?**
 Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, then paste it into your AI assistant of choice. Full native MCP support for additional platforms is on the roadmap as the ecosystem grows.
 
-**Protocol compliance:** ksj-mcp runs on the official Python MCP SDK v2.0.0 over the stdio transport. The server is dual-era: it answers the classic `initialize` handshake (negotiated up to protocol revision `2025-11-25`), and a client that opens with the `2026-07-28` per-request envelope gets the modern era, including `server/discover`. Which era is used is the client's choice. Since v3.7.0 the server answers the handshake before it opens your knowledge base, so startup time no longer grows with the size of your journal. (MCP is versioned by dated spec release, not semantic version — "MCP SDK v2.0.0" above refers to the SDK package's own version number, not the protocol revision.)
+**Protocol compliance:** ksj-mcp runs on the official Python MCP SDK v2.0.0 over the stdio transport. The server is dual-era: it answers the classic `initialize` handshake (negotiated up to protocol revision `2025-11-25`), and a client that opens with the `2026-07-28` per-request envelope gets the modern era, including `server/discover`. Which era is used is the client's choice. Since v3.7.0 the server answers the handshake before it opens your knowledge base, so startup time no longer grows with the size of your journal. Since v3.9.0 the `ksj-mcp` command is a small launcher that answers the handshake from a cache written by the previous run (`handshake-cache.json` in the data directory) while the full server loads, so ksj connects even on a slow or busy machine; the first start after an install or upgrade fills the cache. Set `KSJ_FAST_HANDSHAKE=0` to run the server directly. (MCP is versioned by dated spec release, not semantic version — "MCP SDK v2.0.0" above refers to the SDK package's own version number, not the protocol revision.)
 
 ---
 

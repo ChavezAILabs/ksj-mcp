@@ -1,6 +1,6 @@
 [project]
 name = "ksj-mcp"
-version = "3.8.0"
+version = "3.9.0"
 description = "KSJ v2.0 MCP server — turns journal photos into a searchable AI knowledge base"
 readme = "README.md"
 license = { text = "MIT" }
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ksj-mcp = "ksj_mcp.server:main"
+ksj-mcp = "ksj_mcp.fastlaunch:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0"]

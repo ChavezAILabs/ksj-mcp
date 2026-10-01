@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.9.0 — 2026-10-01
+
+### Fast handshake on slow or busy machines (F7)
+
+- **Problem:** importing the MCP SDK builds hundreds of pydantic models and
+  takes ~7 s on an idle Celeron N4120 laptop — and 22–58 s while the machine
+  is busy (OneDrive sync, a 4-worker job). Clients give a server about
+  30–60 s to answer `initialize`, so ksj regularly failed to connect. Nothing
+  inside ksj can make the SDK import faster.
+- **`ksj-mcp` is now a standard-library-only launcher** (`ksj_mcp.fastlaunch`)
+  that starts in about a second, runs the real server as a child process, and
+  relays JSON-RPC between client and child. Answers to `initialize` and the
+  list requests (`tools/list`, `prompts/list`, `resources/list`,
+  `resources/templates/list`) are cached in `<data dir>/handshake-cache.json`
+  and served immediately; the request still goes to the child, whose fresh
+  answer refreshes the cache. Tool calls are relayed untouched and wait for
+  the child.
+- The cache is keyed by ksj-mcp, MCP SDK and Python versions, and per request
+  by method and parameters (for `initialize`, the requested protocol
+  version). With no matching entry — the first start after an install or
+  upgrade — the launcher only relays, exactly as before.
+- Measured with the CPU at 100%: `initialize` answered in 33.1 s without a
+  cache, 1.8–6.9 s with one.
+- `KSJ_FAST_HANDSHAKE=0` runs the server in-process, as in 3.8.
+
 ## 3.8.0 — 2026-09-28
 
 Two fixes from the 2026-09-25 test pass of 3.7.0: a bounded connection graph
