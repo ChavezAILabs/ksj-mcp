@@ -121,10 +121,19 @@ but is **off unless you explicitly enable it** with your own key.
 
 This server uses **MCP (Model Context Protocol)**, an open standard with growing support across AI platforms and developer tools.
 
-**Currently supported:**
+**Tested:**
 - **Claude Desktop** (free) — full MCP support, recommended for getting started
+- **Claude Code** — terminal and IDE ([setup](#step-3--register-the-server))
+- **Google Antigravity CLI** (`agy`) — add the same `"ksj"` block to
+  `~/.gemini/config/mcp_config.json` (Windows:
+  `C:\Users\<you>\.gemini\config\mcp_config.json`), then restart `agy`.
+  Save the file as plain UTF-8 **without a byte-order mark**: Windows Notepad
+  and PowerShell's `Set-Content` can add one invisibly, and Antigravity then
+  rejects the whole file and loads no MCP servers at all.
 
-**Other MCP-compatible clients** (Cursor, VS Code + GitHub Copilot, and others) can connect using the same config — check your client's MCP documentation for setup details.
+**Other MCP-compatible clients** should work with the same `"ksj"` config
+block but are untested — check your client's MCP documentation for where its
+config lives.
 
 **Using ChatGPT, Gemini, or another platform?**
 Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, then paste it into your AI assistant of choice. Full native MCP support for additional platforms is on the roadmap as the ecosystem grows.
