@@ -26,9 +26,7 @@ _DEFAULT_DB = (
 #
 # Accept-by-default: a page that fails classification, validation, or ID
 # assignment is stored as a WA entry instead of being rejected. WA is also the
-# deliberate intake for off-journal material (loose_capture). Named for the
-# L.A. Times "Wild Art" feature — the shots that belonged to no assignment
-# but still ran.
+# deliberate intake for off-journal material (loose_capture).
 
 WA_REASONS = (
     "id_conflict",            # the page ID was already claimed
