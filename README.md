@@ -495,9 +495,6 @@ until the next label.
 
 ## Wild Art: nothing is ever rejected
 
-Named for the L.A. Times "Wild Art" feature: the best slice-of-life shots that
-belonged to no assignment but still ran in the paper.
-
 Any page the server can't file normally is stored as a **Wild Art (WA)**
 entry (`WA-001`, `WA-002`, …) instead of being rejected. Its text, tags,
 photo, and connections are kept exactly as for any other page, and the reason
