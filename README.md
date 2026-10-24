@@ -20,7 +20,7 @@ Turn your handwritten journal photos into a searchable, AI-powered knowledge bas
 
 - [What it does](#what-it-does)
 - [AI platform support](#ai-platform-support)
-- [Setup (3 steps)](#setup-3-steps)
+- [Setup](#setup)
 - [Usage](#usage)
 - [Available tools](#available-tools)
 - [Schema tag system](#schema-tag-system)
@@ -93,14 +93,17 @@ AI-Extracted entry.** Your original page is never rewritten.
   records the outcome with an `assesses` edge; your REV page's claimed
   status is never rewritten — a real status change only ever happens on a
   future hand-written page.
-- **Dream Capture.** `dream_correlation` reports plain co-occurrence between
-  dream entries and your waking entries — deliberately labeled
-  *co-occurrence, not correlation*, with the window size, match count, and
-  base rate always shown, since a small journal can make anything look
-  meaningful. `bridge_dream_research` builds on it with a dialogue about
-  what a dream's symbols mean to you, and `commit_observation` stores the
-  outcome with an `observes` edge — called an *observation*, not an
-  inference, because that's what a journal this size can actually support.
+- **Dream Capture.** Dreams have a way of picking up whatever you've been
+  turning over by day: the problem you can't put down, the conversation you
+  keep replaying. `dream_correlation` finds those echoes, the dream pages
+  that share a tag with something you wrote in the days around them. It
+  shows its work: how many days it looked across, how many matches it
+  found, and how often that tag turns up anyway, so a real echo stands
+  out from a lucky coincidence. `bridge_dream_research` takes a single
+  dream and talks it through with you: what its symbols mean *to you*, and
+  where they touch your waking work. `commit_observation` saves what you
+  noticed, linked to the dream with an `observes` edge. It's kept as an
+  observation, never a verdict, because the dream is yours to interpret.
 
 Every one of these runs **after** the physical page exists, never before —
 running the check first would let the AI perform the thinking the physical
@@ -123,13 +126,8 @@ This server uses **MCP (Model Context Protocol)**, an open standard with growing
 
 **Tested:**
 - **Claude Desktop** (free) — full MCP support, recommended for getting started
-- **Claude Code** — terminal and IDE ([setup](#step-3--register-the-server))
-- **Google Antigravity CLI** (`agy`) — add the same `"ksj"` block to
-  `~/.gemini/config/mcp_config.json` (Windows:
-  `C:\Users\<you>\.gemini\config\mcp_config.json`), then restart `agy`.
-  Save the file as plain UTF-8 **without a byte-order mark**: Windows Notepad
-  and PowerShell's `Set-Content` can add one invisibly, and Antigravity then
-  rejects the whole file and loads no MCP servers at all.
+- **Claude Code** — terminal and IDE ([setup](#claude-code))
+- **Google Antigravity CLI** (`agy`) ([setup](#google-antigravity-cli))
 
 **Other MCP-compatible clients** should work with the same `"ksj"` config
 block but are untested — check your client's MCP documentation for where its
@@ -142,116 +140,154 @@ Use the `export_captures` tool to dump your knowledge base as Markdown or JSON, 
 
 ---
 
-## Setup (3 steps)
+## Setup
 
-No OCR software needed — your AI assistant reads the pages. (Want fully
-offline OCR too? See [Optional: offline OCR](#optional-offline-ocr-tesseract)
-after setup.)
+The KSJ server runs on your own computer. Your AI assistant reads your journal
+photos, so no OCR software is needed. (For fully offline OCR, see
+[Optional: offline OCR](#optional-offline-ocr-tesseract) after setup.)
 
-### Step 1 — Install an MCP-compatible AI client
+### Prerequisites
 
-The fastest way to get started is **Claude Desktop** (free at claude.ai/download).
+Before you install the KSJ server, complete the following requirements:
 
-For other MCP clients, consult their documentation for how to register a local MCP server, then use the config in Step 3.
+1. **Install an MCP client.** The fastest way to start is **Claude Desktop**,
+   free at [claude.ai/download](https://claude.ai/download). The server is also
+   tested with Claude Code and Google Antigravity CLI. For any other client,
+   see its documentation on registering a local MCP server.
+2. **Install Git.** uv uses Git to download the server. On Windows, install
+   [Git for Windows](https://git-scm.com/download/win). macOS and most Linux
+   distributions include Git.
+3. **Install uv**, the Python package manager that installs and runs the
+   server:
 
-### Step 2 — Install uv and the KSJ server
+   | Platform | Command |
+   |----------|---------|
+   | **Windows** | `winget install astral-sh.uv` or [download from astral.sh/uv](https://astral.sh/uv) |
+   | **macOS/Linux** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 
-**uv** is a fast Python package manager used to install and run the KSJ server.
+4. **Open a new terminal** and run `uv --version` to confirm that uv is
+   installed.
 
-**Install uv:**
+> **Note:** On Windows 11, **Smart App Control** or **Microsoft Defender
+> SmartScreen** can block a program it doesn't recognize, such as a downloaded
+> installer or the `ksj-mcp.exe` that uv creates. If you see **Windows
+> protected your PC**, select **More info**, confirm the file is the one you
+> expect, and then select **Run anyway**. Smart App Control has no per-app
+> exception: if it blocks `ksj-mcp.exe`, the only fix is to turn it off in
+> **Windows Security > App & browser control > Smart App Control settings**.
+> That's a security setting, so it's your call.
 
-| Platform | Command |
-|----------|---------|
-| **Windows** | `winget install astral-sh.uv` or [download from astral.sh/uv](https://astral.sh/uv) |
-| **macOS/Linux** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+### Step 1 — Install the KSJ server
 
-Open a **new** terminal after installing uv, then verify with `uv --version`
-before continuing.
+1. **Run the install command** in a terminal:
 
-**Install the KSJ server** (run once in a terminal):
+   ```bash
+   uv tool install --compile-bytecode --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
+   ```
 
-```bash
-uv tool install --compile-bytecode --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
-```
+   This installs `ksj-mcp` as a persistent command on your machine.
+   `--compile-bytecode` precompiles the server and its libraries, so the first
+   launch isn't slowed by compiling them.
+2. **Verify the install.** Run `uv tool list`. The output lists `ksj-mcp` with
+   a version number.
 
-This installs `ksj-mcp` as a persistent command on your machine. Git must be
-installed for this step (Windows: [Git for Windows](https://git-scm.com/download/win)).
-`--compile-bytecode` precompiles the server and its libraries at install
-time, so the first launch isn't slowed by compiling them.
+### Step 2 — Configure your MCP client
 
-Verify with `uv tool list` — it should list `ksj-mcp` with a version number.
+The configuration examples use the following placeholder:
 
-**To update later:**
+- `YOUR_USERNAME`: your user name on this computer, the folder name under
+  `C:\Users\` (Windows) or `/Users/` (macOS).
 
-1. **Fully quit your AI client first** — on Windows, close Claude Desktop from
-   the system tray too, not just the window. The client keeps the `ksj-mcp`
+Use the **full path** to the `ksj-mcp` program that uv installed. MCP clients
+launch servers with a limited `PATH`, so a bare `"ksj-mcp"` often fails even
+though it works in a terminal.
+
+| Platform | Full path to `ksj-mcp` |
+|----------|------|
+| **Windows** | `C:\Users\YOUR_USERNAME\.local\bin\ksj-mcp.exe` |
+| **macOS** | `/Users/YOUR_USERNAME/.local/bin/ksj-mcp` |
+| **Linux** | `/home/YOUR_USERNAME/.local/bin/ksj-mcp` |
+
+#### Claude Desktop
+
+1. **Open the config file.** In Claude Desktop, select **Settings > Developer >
+   Edit Config**. Or open the file directly:
+
+   | Platform | Path |
+   |----------|------|
+   | **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` |
+   | **Windows (Microsoft Store install)** | `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json` |
+   | **macOS** | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+2. **Quit Claude Desktop fully.** On Windows, also quit it from the system
+   tray. Claude Desktop saves its own settings to this file when it quits, and
+   can overwrite changes you made while it was running.
+3. **Add the `ksj` entry.** Windows example (use your platform's path from the
+   table above):
+
+   ```json
+   {
+     "mcpServers": {
+       "ksj": {
+         "command": "C:\\Users\\YOUR_USERNAME\\.local\\bin\\ksj-mcp.exe"
+       }
+     }
+   }
+   ```
+
+   If the file already has an `mcpServers` block, add the `"ksj": { … }` entry
+   inside it rather than adding a second block.
+4. **Save the file and start Claude Desktop.**
+5. **Verify that ksj is connected.** **ksj** appears under **Settings >
+   Developer** with status *running*. Ask your assistant to run `get_version`.
+
+#### Claude Code
+
+1. **Register ksj for all your projects:**
+
+   ```bash
+   claude mcp add --scope user ksj -- C:\Users\YOUR_USERNAME\.local\bin\ksj-mcp.exe
+   ```
+
+   On macOS or Linux, use the full path from the table above.
+2. **Verify that ksj is connected.** Run `claude mcp get ksj`. The output says
+   *Connected*.
+
+#### Google Antigravity CLI
+
+1. **Open the config file** `~/.gemini/config/mcp_config.json` (Windows:
+   `C:\Users\YOUR_USERNAME\.gemini\config\mcp_config.json`).
+2. **Add the `ksj` entry**, the same block shown for Claude Desktop.
+3. **Save the file as plain UTF-8 without a byte-order mark.**
+
+   > **Note:** Windows Notepad and PowerShell's `Set-Content` can add a
+   > byte-order mark invisibly. Antigravity then rejects the whole file and
+   > loads no MCP servers at all.
+
+4. **Restart `agy`.**
+5. **Verify that ksj is connected.** Run `/mcp` in `agy`.
+
+> **Note:** The first start after an install or update is slow. The server
+> loads its libraries from scratch and saves its handshake answers for next
+> time. If it times out, quit and reopen your client once more (see
+> [Troubleshooting](#troubleshooting)). Every start after that connects in
+> seconds.
+
+### Update the server
+
+1. **Quit your AI client fully.** On Windows, also quit Claude Desktop from
+   the system tray, not just the window. The client keeps the `ksj-mcp`
    program open, and the update then fails with *"Failed to install
    entrypoint … being used by another process (os error 32)"*.
-2. Run:
+2. **Run the update command:**
+
    ```bash
    uv tool install --reinstall --compile-bytecode --from git+https://github.com/ChavezAILabs/ksj-mcp ksj-mcp
    ```
+
    `--reinstall` matters: a plain `uv tool install` silently does nothing when
    the version number hasn't changed.
-3. Reopen your AI client and ask it to run `get_version`.
-
-The first start after an install or update is the slow one: the server loads
-its libraries from scratch and saves its handshake answers for next time (see
-[Troubleshooting](#troubleshooting) if it times out). Every start after that
-connects in seconds.
-
-### Step 3 — Register the server
-
-**Claude Desktop:** open **Settings → Developer → Edit Config** — that opens
-the right file for you. Or find it directly:
-
-| Platform | Path |
-|----------|------|
-| **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` |
-| **macOS** | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-
-> **Edit the file only while Claude Desktop is fully quit** (Windows: also
-> quit it from the system tray). Claude Desktop saves its own settings to this
-> same file when it quits, and can overwrite changes you made while it was
-> running.
-
-Claude Desktop launches MCP servers with a limited `PATH`, so a bare
-`"ksj-mcp"` command often won't resolve even though it works fine in a
-terminal — use the full path to the binary `uv tool install` created in
-Step 2 instead:
-
-| Platform | Typical binary path |
-|----------|------|
-| **Windows** | `C:\Users\<you>\.local\bin\ksj-mcp.exe` |
-| **macOS/Linux** | `~/.local/bin/ksj-mcp` (expand `~` to the full path, e.g. `/Users/<you>/.local/bin/ksj-mcp`) |
-
-Add the following block (Windows example shown — swap in your macOS/Linux path if applicable):
-
-```json
-{
-  "mcpServers": {
-    "ksj": {
-      "command": "C:\\Users\\<you>\\.local\\bin\\ksj-mcp.exe"
-    }
-  }
-}
-```
-
-If the file already has an `mcpServers` block, add the `"ksj": { … }` entry
-inside it rather than adding a second block. Save, then start Claude Desktop.
-**ksj** should appear under **Settings → Developer** with status *running*,
-and in the chat's connectors/tools menu. Ask your assistant to run
-`get_version` to confirm.
-
-**Claude Code** (terminal or IDE) — one command registers ksj for all your
-projects:
-
-```bash
-claude mcp add --scope user ksj -- C:\Users\<you>\.local\bin\ksj-mcp.exe
-```
-
-(macOS: use the full path from the table above.) Check it with
-`claude mcp get ksj`; it should say *Connected*.
+3. **Reopen your AI client** and ask it to run `get_version`.
 
 ### Optional: offline OCR (Tesseract)
 
@@ -283,7 +319,7 @@ vs ~95% for Tesseract):
 {
   "mcpServers": {
     "ksj": {
-      "command": "C:\\Users\\<you>\\.local\\bin\\ksj-mcp.exe",
+      "command": "C:\\Users\\YOUR_USERNAME\\.local\\bin\\ksj-mcp.exe",
       "env": {
         "KSJ_OCR_BACKEND": "azure",
         "KSJ_AZURE_ENDPOINT": "https://<your-resource>.cognitiveservices.azure.com",
@@ -294,7 +330,7 @@ vs ~95% for Tesseract):
 }
 ```
 
-(Use the `command` path from [Step 3](#step-3--register-the-server) for your platform.)
+(Use the `command` path from [Step 2](#step-2--configure-your-mcp-client) for your platform.)
 
 What this means for your data: each uploaded image is sent to **your own**
 Azure resource (your subscription, your key, Azure's data terms) for text
@@ -428,12 +464,12 @@ strongest, then the nearest in time.
 | `journal_health` | KPI dashboard + coaching: velocity, synthesis ratio, review cadence, open questions |
 | `get_breakthroughs` | All SYN entries chronologically — your complete breakthrough timeline |
 | `dream_patterns` | Recurring symbols, emotions, motifs, and themes across DC pages |
-| `dream_correlation` | Co-occurrence between DC entries and RC/REV entries sharing a tag, within a day window — descriptive only: always reports the window, match count, and base rate, never claims "correlation" or significance |
+| `dream_correlation` | Find waking-life echoes in your dreams: DC pages that share a tag with RC/REV entries written within a few days of them. Shows the window, match count, and how often the tag turns up anyway, so a real echo stands out from coincidence |
 | `knowledge_progress` | Track Needs Work → Solid → Mastered progression from REV entries |
 | `audit_knowledge_status` | Independently check a REV page's claimed status against evidence (open questions, uncited insights), then run a structured dialogue over anything that doesn't line up — runs after the page exists, never before; no DB write |
 | `commit_assessment` | Store the confirmed outcome of an `audit_knowledge_status` dialogue as an AIEX entry, linked to its REV page with an asserted `assesses` edge — never changes the REV page's own claimed status |
-| `bridge_dream_research` | Independently check a DC page for cross-domain echo (via `dream_correlation`) and prepare a dialogue over what its symbols mean to you — runs after the page exists, never before; no DB write |
-| `commit_observation` | Store the confirmed outcome of a `bridge_dream_research` dialogue as an AIEX entry, linked to its DC page with an asserted `observes` edge — never changes the DC page's own dream narrative |
+| `bridge_dream_research` | Talk a single dream through with you: looks for its echoes in your waking work (via `dream_correlation`), then asks what its symbols mean to you. Only for a dream you've already written down; saves nothing on its own |
+| `commit_observation` | Save what you noticed in a `bridge_dream_research` conversation, once you approve it, as an AIEX entry linked to the dream with an `observes` edge. Your dream as written is never changed |
 
 ### AI session tools
 
@@ -594,8 +630,18 @@ The library part of the update may already have succeeded, so the next start
 can run the new version anyway, but re-run the command so uv's own record of
 the install is correct.
 
+**"Windows protected your PC" / "Smart App Control blocked an app"**
+Windows, during install or the first start: Windows 11 doesn't recognize a
+newly installed program.
+
+- **SmartScreen** ("Windows protected your PC"): select **More info**, confirm
+  the file is the one you expect, and then select **Run anyway**.
+- **Smart App Control**: it has no per-app exception. To run `ksj-mcp.exe`,
+  turn it off in **Windows Security > App & browser control > Smart App
+  Control settings**. That's a security setting, so it's your call.
+
 **"Server transport closed unexpectedly" / server not starting**
-Run `uv tool list` in a terminal — it should list `ksj-mcp` with a version number. If it's missing, re-run the install command from Step 2. If it's installed, the issue is likely the Claude Desktop config — double-check it is valid JSON and that `command` is the **full path** to the `ksj-mcp` binary (see [Step 3](#step-3--register-the-server)), not just `"ksj-mcp"`.
+Run `uv tool list` in a terminal — it should list `ksj-mcp` with a version number. If it's missing, re-run the install command from [Step 1](#step-1--install-the-ksj-server). If it's installed, the issue is likely the Claude Desktop config — double-check it is valid JSON and that `command` is the **full path** to the `ksj-mcp` binary (see [Step 2](#step-2--configure-your-mcp-client)), not just `"ksj-mcp"`.
 
 **Server not appearing in tools panel**
 Confirm `uv tool list` shows `ksj-mcp` installed, verify the config file is valid JSON, and restart Claude Desktop after saving any config changes. Once it's connected, ask your assistant to use the `get_version` tool — that confirms the server is actually running and reachable, not just installed.
@@ -608,7 +654,7 @@ All your captures are stored locally in `~/.ksj-mcp/`:
 
 | Platform | Path |
 |----------|------|
-| **Windows** | `C:\Users\<you>\.ksj-mcp\` |
+| **Windows** | `C:\Users\YOUR_USERNAME\.ksj-mcp\` |
 | **macOS/Linux** | `~/.ksj-mcp/` |
 
 **Files:**
@@ -634,7 +680,7 @@ checked the upgraded journal, old backups can be deleted.
 {
   "mcpServers": {
     "ksj": {
-      "command": "C:\\Users\\<you>\\.local\\bin\\ksj-mcp.exe",
+      "command": "C:\\Users\\YOUR_USERNAME\\.local\\bin\\ksj-mcp.exe",
       "env": {
         "KSJ_DATA_DIR": "C:\\Users\\you\\Documents\\ksj-data"
       }
@@ -643,7 +689,7 @@ checked the upgraded journal, old backups can be deleted.
 }
 ```
 
-(Use the `command` path from [Step 3](#step-3--register-the-server) for your platform.)
+(Use the `command` path from [Step 2](#step-2--configure-your-mcp-client) for your platform.)
 
 ---
 
