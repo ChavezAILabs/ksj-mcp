@@ -24,6 +24,9 @@ and by the request's method and parameters (for `initialize`, the requested
 protocol version). No cache entry means plain relaying: the first run after
 an install or upgrade behaves exactly like the server without this launcher.
 
+The launcher speaks the classic `initialize` era only: it declines the
+2026-07-28 `server/discover` probe itself (see DISCOVER_METHOD).
+
 Set KSJ_FAST_HANDSHAKE=0 to bypass the launcher and run the server in-process.
 """
 
@@ -50,6 +53,16 @@ CACHEABLE_METHODS = frozenset({
 })
 
 CACHE_FILE = "handshake-cache.json"
+
+# The 2026-07-28 era probe. The launcher declines it itself (method not found)
+# and never forwards it: the SDK fixes a connection's era from the first
+# request it sees, so a forwarded probe would put the child in the modern era
+# while the client, timing the probe out, goes on with a classic `initialize`
+# that the launcher answers from the cache - and every later tool call then
+# fails the child's per-request envelope check. Declined, the client connects
+# classic and remembers the server as a classic peer.
+DISCOVER_METHOD = "server/discover"
+METHOD_NOT_FOUND = -32601
 
 
 def _data_dir() -> Path:
@@ -148,6 +161,11 @@ class Relay:
             msg = json.loads(line)
         except ValueError:
             pass
+        if isinstance(msg, dict) and msg.get("method") == DISCOVER_METHOD and "id" in msg:
+            error = {"code": METHOD_NOT_FOUND, "message": "Method not found"}
+            reply = {"jsonrpc": "2.0", "id": msg["id"], "error": error}
+            self._send_client(json.dumps(reply).encode("utf-8"))
+            return  # not forwarded: see DISCOVER_METHOD
         if (isinstance(msg, dict) and msg.get("method") in CACHEABLE_METHODS
                 and "id" in msg):
             key = request_key(msg["method"], msg.get("params"))

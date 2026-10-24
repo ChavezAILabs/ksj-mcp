@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.9.1 — 2026-10-23
+
+### Claude Code: every tool call failed with an envelope error
+
+- **Symptom:** in Claude Code, ksj showed as connected with all its tools, but
+  every tool call failed with *"params._meta is missing the required envelope
+  key(s): io.modelcontextprotocol/protocolVersion,
+  io.modelcontextprotocol/clientCapabilities"*. Claude Desktop was unaffected.
+- **Cause:** Claude Code opens with a `server/discover` probe for the
+  2026-07-28 protocol era and, when the answer is slow, goes on with a
+  classic `initialize`. The MCP SDK fixes a connection's era from the first
+  request it sees, so the forwarded probe put the server in the 2026 era and
+  it rejected the `initialize` that followed. The 3.9.0 launcher had already
+  answered `initialize` from its cache and dropped that rejection, so the
+  client connected classic to a server that then refused every classic tool
+  call. Claude Code's MCP log shows it as *"stdio server answered the
+  server/discover probe after it had connected legacy"*.
+- **Fix:** the launcher declines `server/discover` itself (JSON-RPC
+  `-32601`, method not found) and does not forward it. The server always
+  sees `initialize` first and stays classic, matching the cached answer, and
+  the client remembers ksj as a classic peer. Through the launcher ksj now
+  speaks the classic era only; `KSJ_FAST_HANDSHAKE=0` still serves both.
+- New tests replay the probe-then-`initialize` sequence, against the relay
+  and end to end against the real server with a `get_version` tool call.
+
 ## 3.9.0 — 2026-10-01
 
 ### Fast handshake on slow or busy machines (F7)

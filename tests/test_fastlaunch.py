@@ -45,6 +45,10 @@ def _req(rid, method, params=None):
 INIT = {"protocolVersion": "2025-06-18", "capabilities": {},
         "clientInfo": {"name": "t", "version": "1"}}
 
+# A 2026-07-28 era probe, as Claude Code sends it before `initialize`.
+DISCOVER = {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                      "io.modelcontextprotocol/clientCapabilities": {}}}
+
 
 def _run(tmp_path, lines, cache=None, delay=0.0):
     script = tmp_path / "fake_child.py"
@@ -135,6 +139,14 @@ class TestRelay:
                                      _req(2, "ping")])
         assert [r["id"] for r in replies] == [1, 2]
 
+    def test_discover_probe_declined_and_not_forwarded(self, tmp_path):
+        replies, _ = _run(tmp_path, [_req("p", "server/discover", DISCOVER),
+                                     _req(1, "initialize", INIT)])
+        by_id = {r["id"]: r for r in replies}
+        assert len(replies) == 2                      # the fake child never saw the probe
+        assert by_id["p"]["error"]["code"] == fastlaunch.METHOD_NOT_FOUND
+        assert by_id[1]["result"]["from"] == "child"
+
     def test_string_ids(self, tmp_path):
         cache = HandshakeCache(tmp_path / "cache.json", "build-1")
         cache.put(request_key("tools/list", {}), {"tools": []})
@@ -190,3 +202,33 @@ def test_end_to_end_second_start_served_from_cache(tmp_path):
     assert n_warm == n_cold >= 30
     # Answered before the child could have imported the MCP SDK.
     assert t_warm < 5.0, f"cached initialize took {t_warm:.1f}s"
+
+
+def test_end_to_end_discover_probe_then_initialize(tmp_path):
+    """Claude Code's connect sequence: a server/discover probe, then the
+    classic handshake. Before 3.9.1 the probe reached the server first and
+    fixed the connection in the 2026 era, so the cached `initialize` reply hid
+    a rejection and every tool call failed the envelope check."""
+    env = {**os.environ, "KSJ_DATA_DIR": str(tmp_path), "KSJ_FAST_HANDSHAKE": "1"}
+    _handshake(env)                                   # fill the cache first
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "from ksj_mcp.fastlaunch import main; main()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env,
+    )
+    proc.stdin.write(_req("probe", "server/discover", DISCOVER))
+    proc.stdin.write(_req(1, "initialize", INIT))
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0",
+                                 "method": "notifications/initialized"}).encode() + b"\n")
+    proc.stdin.write(_req(2, "tools/call", {"name": "get_version", "arguments": {}}))
+    proc.stdin.flush()
+    replies = {}
+    while 2 not in replies:
+        msg = json.loads(proc.stdout.readline())
+        if "id" in msg:
+            replies[msg["id"]] = msg
+    proc.stdin.close()
+    proc.wait(timeout=120)
+    assert replies["probe"]["error"]["code"] == fastlaunch.METHOD_NOT_FOUND
+    assert "serverInfo" in replies[1]["result"]
+    assert "error" not in replies[2], replies[2]
+    assert not replies[2]["result"].get("isError"), replies[2]
