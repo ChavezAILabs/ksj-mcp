@@ -1,5 +1,56 @@
 # Changelog
 
+## 3.9.2 — 2026-10-30
+
+Fixes found rehearsing a demo journal, plus the journal's edition mark.
+
+### Citations made before the page existed now link on capture
+
+- **Before:** a page that cites `@RC-005` before RC-005 is captured got no
+  edge when RC-005 arrived. The upload showed only tag overlaps, and the
+  citations appeared only after a full `rebuild_connections`.
+- **Now:** storing a page also links every earlier capture that cites it
+  (`find_back_references`). The upload lists them as "← cited by …", with
+  the same edges a rebuild produces. When two volumes hold the same page ID,
+  citations resolve to the first, at capture time as in a rebuild.
+- `@RC-0050` no longer counts as a citation of `@RC-005`.
+
+### Fewer junk tags (U4, U6, F11)
+
+- **A spaced arrow inside a sentence is not a cause/effect tag.** "Euclid
+  300 BCE -> infinite primes" used to store `->bce->infinite`, and "f: R -> R"
+  stored `->r->r`. An arrow is a tag when written compactly (`study→retention`)
+  or on a line holding only tags (`Tags: #lean4 Noether → Witt`).
+- **A tag needs a letter.** `#768` (a run number) and `$24` (a price) stay
+  text. `#3D` is still a tag.
+- Existing tags are not changed. These rules apply to new and re-parsed pages.
+
+### Connection lists (F12, F15)
+
+- Upload output lists connections in `find_connections` order (citations,
+  then shared entities, then shared tags) and with its wording ("→ cites",
+  "← cited by", "↔ shares tags with").
+- Both lists are numbered and show capture numbers (`1. ← cited by RC-006
+  (#5)`), so an assistant relaying a list copies it instead of rebuilding it.
+- **"★ Strongest connection" prefers a citation over tag overlap**, so it no
+  longer points at a different page than the top of `find_connections`.
+
+### Edition mark
+
+- Journal pages from Rev C on carry a printed mark under the template ID
+  (`v2.0 · Rev C`). When a transcription includes it, it is stored as the
+  page's `edition` field and shown on upload (`Edition  : v2.0 · Rev C`).
+  It is never a tag or the summary. Rev A and B pages have no mark.
+- The server instructions ask assistants to transcribe the mark.
+- No schema change: the field lives in the page's content, so
+  `export_backup` / `import_backup` carry it as is.
+
+### Other
+
+- `htmlview.py`: fixed the `SyntaxWarning: invalid escape sequence '\/'`
+  printed at every start (U3). The generated page is unchanged.
+- 23 new tests (`tests/test_v392.py`); 507 pass.
+
 ## 3.9.1 — 2026-10-23
 
 ### Claude Code: every tool call failed with an envelope error

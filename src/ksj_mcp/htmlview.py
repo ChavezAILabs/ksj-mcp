@@ -508,7 +508,7 @@ function clusterDisplay(role, value) {
 
 function hashToNav(hash) {
   let parts;
-  try { parts = (hash || '').replace(/^#\/?/, '').split('/').map(decodeURIComponent); }
+  try { parts = (hash || '').replace(/^#\\/?/, '').split('/').map(decodeURIComponent); }
   catch (e) { parts = []; }
   const mode = ['timeline', 'index', 'graph'].includes(parts[0]) ? parts[0] : 'timeline';
   const n = { mode, cap: null, tag: null, entity: null, center: null };

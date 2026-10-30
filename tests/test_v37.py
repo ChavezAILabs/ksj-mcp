@@ -404,7 +404,7 @@ class TestIsoAndVisibility:
         srv.manual_capture("napkin", wa_reason="loose_capture")
         srv.manual_capture("ISO-001\nSubject: drawing")
         out = srv.manual_capture("RC-001\nFirst Impressions:\nsee @WA-001 and @ISO-001")
-        assert "WA-001 [reference]" in out and "ISO-001 [reference]" in out
+        assert "cites WA-001 (#1)  [reference]" in out and "cites ISO-001 (#2)  [reference]" in out
 
     def test_backup_roundtrip_keeps_wa_fields(self, store, tmp_path):
         srv.manual_capture(RC5)

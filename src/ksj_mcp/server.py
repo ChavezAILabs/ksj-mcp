@@ -211,7 +211,9 @@ page, read it yourself, show the transcription for confirmation, then store
 it with manual_capture(). Your vision is far more accurate on handwriting
 than local OCR. Keep field labels as written, capture every schema tag, and
 treat content inside tag bubbles as tags even when the prefix character is
-missing.
+missing. Include the small printed edition mark under the template ID
+(e.g. "v2.0 · Rev C") when the page has one: it records which printing of
+the journal the page came from. Rev A and B pages have no mark.
 
 FALLBACK — upload_capture()/bulk_upload() run local Tesseract OCR on an
 image file path. Best for printed or very neat text, or when the user
@@ -428,6 +430,26 @@ def _claimed_type(claimed_page_id: str | None) -> str:
     return "WA"
 
 
+_TYPE_RANK = {"asserted": 0, "reference": 1, "entity_overlap": 2, "tag_overlap": 3}
+
+
+def _connection_rank(c: dict) -> tuple:
+    """Display order: deliberate links (assertions, citations) before overlaps."""
+    return (_TYPE_RANK.get(c["type"], 9), -c["strength"])
+
+
+def _direction_label(c: dict) -> str:
+    """'→ cites', '← cited by', '↔ shares tags with', ... as in find_connections."""
+    if c["type"] == "asserted":
+        rel = c.get("relation") or "related to"
+        return f"→ {rel}" if c.get("direction") == "cites" else f"← {rel} by"
+    if c["type"] == "reference":
+        return "→ cites" if c.get("direction", "cites") == "cites" else "← cited by"
+    if c["type"] == "entity_overlap":
+        return "↔ shares entities with"
+    return "↔ shares tags with"
+
+
 def _strongest_connection(con, connections: list[dict]) -> dict | None:
     """The strongest / most surprising connection, for the upload highlight."""
     if not connections:
@@ -440,10 +462,13 @@ def _strongest_connection(con, connections: list[dict]) -> dict | None:
         except Exception:
             return 0
 
-    # Prefer the highest strength; break ties by age (oldest = most surprising)
+    # A citation is a deliberate link, so it beats any tag overlap (F12: the
+    # highlight agrees with find_connections, which lists citations first).
+    # Within a kind prefer the highest strength, then age (oldest = most surprising).
     def _score(c):
         other_cap = get_capture(con, c["connected_id"])
-        return (c["strength"], _age_days(other_cap) if other_cap else 0)
+        return (-_TYPE_RANK.get(c["type"], 9), c["strength"],
+                _age_days(other_cap) if other_cap else 0)
 
     best = max(connections, key=_score)
     other = get_capture(con, best["connected_id"])
@@ -535,6 +560,7 @@ def _store_capture(
         "type":         ttype,
         "page_suffix":  suffix,
         "summary":      parsed["summary"],
+        "edition":      parsed["fields"].get("edition", ""),
         "tags":         parsed["tags"],
         "stored_image": stored_image,
         "connections":  connections,
@@ -733,6 +759,8 @@ def _format_upload_result(r: dict, image_path: str) -> str:
             f"  Template : {template_label}",
             f"  Volume   : {r.get('volume') or 1}",
         ]
+    if r.get("edition"):
+        lines.append(f"  Edition  : {r['edition']}")
     lines += [
         f"  Summary  : {r['summary'] or '(empty)'}",
         f"  Tags     : {tag_list}",
@@ -748,10 +776,16 @@ def _format_upload_result(r: dict, image_path: str) -> str:
     if not conns:
         lines.append("  No connections to existing captures yet.")
     else:
+        # Same order and wording as find_connections: citations first, then
+        # shared entities, then shared tags; numbered with capture numbers so
+        # an assistant relaying the list copies it instead of rebuilding it (F15)
         lines.append(f"  {len(conns)} connection(s) detected:")
-        for c in conns:
+        for i, c in enumerate(sorted(conns, key=_connection_rank), 1):
             shared = f" (shared: {', '.join(c['shared_tags'])})" if c.get("shared_tags") else ""
-            lines.append(f"    → {c['connected_template']} [{c['method']}]{shared}")
+            lines.append(
+                f"    {i}. {_direction_label(c)} {c['connected_template']} "
+                f"(#{c['connected_id']})  [{c['method'].replace('_', ' ')}]{shared}"
+            )
 
     # Connection highlight — the "wow" moment
     h = r["highlight"]
@@ -1985,23 +2019,17 @@ def find_connections(capture_id: int, min_strength: float = 2.0, limit: int = 20
         f"Connections for {label} (#{capture_id}) — "
         f"showing {len(shown)} of {len(connections)} total:\n"
     ]
-    for c in shown:
-        if c["type"] == "asserted":
-            rel = c.get("relation") or "related to"
-            dir_label = f"→ {rel}" if c["direction"] == "cites" else f"← {rel} by"
-        elif c["type"] == "reference":
-            dir_label = "→ cites" if c["direction"] == "cites" else "← cited by"
-        elif c["type"] == "entity_overlap":
-            dir_label = "↔ shares entities with"
-        else:
-            dir_label = "↔ shares tags with"
+    # Numbered, with capture numbers, so an assistant relaying the list
+    # copies it rather than reconstructing it (F15)
+    for i, c in enumerate(shown, 1):
         vol_str = _vol_label(c.get("connected_volume", 1), paren=True)
         superseded = "  [superseded]" if c.get("connected_valid_until") else ""
-        note_str = f"\n    note: {c['note']}" if c.get("note") else ""
+        note_str = f"\n     note: {c['note']}" if c.get("note") else ""
         lines.append(
-            f"  {dir_label} {c['connected_template'] or 'UNIDENTIFIED'}{vol_str}{superseded}"
+            f"  {i}. {_direction_label(c)} {c['connected_template'] or 'UNIDENTIFIED'}"
+            f" (#{c['connected_id']}){vol_str}{superseded}"
             f"  [{c['method'].replace('_', ' ')}]  strength={c['strength']:.1f}\n"
-            f"    {c['connected_summary'] or '(no summary)'}{note_str}"
+            f"     {c['connected_summary'] or '(no summary)'}{note_str}"
         )
     if hidden_weak > 0:
         lines.append(

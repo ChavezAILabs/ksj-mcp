@@ -8,7 +8,7 @@
 
 **Knowledge Synthesis Journal v2.0 — AI companion**
 
-**Current release: ksj-mcp v3.9.1** · built on the official **Python MCP SDK 2.x**
+**Current release: ksj-mcp v3.9.2** · built on the official **Python MCP SDK 2.x**
 
 Turn your handwritten journal photos into a searchable, AI-powered knowledge base — privately, on your own machine.
 
@@ -495,6 +495,10 @@ Use these prefixes anywhere on your journal pages — the server extracts them a
 | `$` | Key insight | `$breakthrough` |
 | `A→B` | Cause / effect | `study→retention` |
 
+Write `A→B` compactly (`study→retention`) or on your tags line. An arrow inside
+an ordinary sentence ("Euclid 300 BCE -> infinite primes") is just writing, not
+a tag. A tag needs at least one letter, so `#768` or `$24` stay plain text.
+
 **DC (Dream Capture) pages** use a dream-specific variant:
 
 | Prefix | Meaning | Example |
@@ -581,6 +585,12 @@ a page from a new journal (`promote_capture(…, volume=2)`), a misread ID
 (`promote_capture` with the right ID), or a cleaner re-capture of the same page
 (re-upload with `force=True`). Nothing is ever silently overwritten, and a page
 is never filed into the wrong volume to get around a conflict.
+
+**Which printing a page came from.** From Rev C on, every template page of the
+journal carries a small edition mark under its template ID (`v2.0 · Rev C`).
+When the assistant transcribes it, the server records it with the page and
+shows it on upload (`Edition : v2.0 · Rev C`). Rev A and Rev B pages have no
+mark.
 
 ---
 

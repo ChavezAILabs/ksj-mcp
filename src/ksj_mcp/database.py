@@ -513,6 +513,7 @@ def get_connections(
     rows = con.execute(
         f"""SELECT c.id, c.source_id, c.target_id, c.type, c.strength, c.method,
                   c.relation, c.note, c.asserted_by,
+                  cap.id          AS connected_id,
                   cap.template_id AS connected_template,
                   cap.volume      AS connected_volume,
                   cap.summary     AS connected_summary,

@@ -18,7 +18,7 @@ from .templates import assign_role
 
 # Matches @RC-001, @SYN-003, @REV-002, @DC-004, @ISO-001, @WA-007 etc.
 _REF_PATTERN = re.compile(
-    r'@(RC|SYN|REV|DC|ISO|WA)-(\d{3})',
+    r'@(RC|SYN|REV|DC|ISO|WA)-(\d{3})(?!\d)',   # @RC-0050 is not @RC-005
     re.IGNORECASE,
 )
 
@@ -238,6 +238,46 @@ def find_reference_connections(
     return refs
 
 
+def find_back_references(
+    con: sqlite3.Connection, capture_id: int
+) -> list[dict]:
+    """
+    Find earlier captures whose text cites *capture_id* by its template ID.
+
+    A page can cite @RC-005 before RC-005 is captured. Those citations are
+    resolved here, the moment the cited page arrives, so the upload shows
+    them without a rebuild_connections. Only when *capture_id* is the
+    capture a citation resolves to (find_reference_connections takes the
+    first match), so upload-time and rebuilt graphs agree.
+
+    Returns list of dicts:
+      {"source_id": int, "template_id": str (the citing page), "strength": 1.0}
+    """
+    row = con.execute(
+        "SELECT template_id FROM captures WHERE id=?", (capture_id,)
+    ).fetchone()
+    tid = row["template_id"] if row else None
+    if not tid or not _REF_PATTERN.fullmatch(f"@{tid}"):
+        return []
+    resolved = con.execute(
+        "SELECT id FROM captures WHERE template_id=? COLLATE NOCASE", (tid,)
+    ).fetchone()
+    if resolved is None or resolved["id"] != capture_id:
+        return []
+
+    citers = con.execute(
+        "SELECT id, template_id, COALESCE(corrected_ocr, raw_ocr) AS body FROM captures "
+        "WHERE id != ? AND COALESCE(corrected_ocr, raw_ocr) LIKE ?",
+        (capture_id, f"%@{tid}%"),
+    ).fetchall()
+    return [
+        {"source_id": r["id"], "template_id": r["template_id"] or "?", "strength": 1.0}
+        for r in citers
+        if any(f"{m.group(1).upper()}-{m.group(2)}" == tid.upper()
+               for m in _REF_PATTERN.finditer(r["body"]))
+    ]
+
+
 def _template_ids(con: sqlite3.Connection, ids: list[int]) -> dict[int, str]:
     """template_id for each of *ids*, in one query."""
     if not ids:
@@ -325,6 +365,28 @@ def build_connections(con: sqlite3.Connection, capture_id: int) -> list[dict]:
             "connected_id": rc["target_id"],
             "connected_template": rc["template_id"],
             "shared_tags": [],
+            "direction": "cites",
+        })
+
+    # @-references made before this page existed
+    for br in find_back_references(con, capture_id):
+        conn_id = insert_connection(
+            con,
+            source_id=br["source_id"],
+            target_id=capture_id,
+            type_="reference",
+            strength=br["strength"],
+            method="reference",
+        )
+        results.append({
+            "connection_id": conn_id,
+            "type": "reference",
+            "method": "reference",
+            "strength": br["strength"],
+            "connected_id": br["source_id"],
+            "connected_template": br["template_id"],
+            "shared_tags": [],
+            "direction": "cited_by",
         })
 
     con.commit()

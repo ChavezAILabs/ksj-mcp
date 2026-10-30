@@ -97,7 +97,9 @@ def extract_schema_tags(text: str, template_type: str = "") -> list[dict[str, st
 
     def _add(prefix: str, raw_value: str) -> None:
         value = normalize_tag_value(raw_value)
-        if not value:
+        # A tag names something, so it needs a letter: "#768" is a run
+        # number and "$24" a price, not a topic or an insight (U6).
+        if not value or not any(ch.isalpha() for ch in value):
             return
         key = (prefix, value)
         if key not in seen:
@@ -122,9 +124,30 @@ def extract_schema_tags(text: str, template_type: str = "") -> list[dict[str, st
         _add(prefix, m.group(2))
 
     for m in _ARROW_TAG.finditer(text):
-        _add("->", f"{m.group(1)}->{m.group(2)}")
+        if _is_arrow_tag(text, m):
+            _add("->", f"{m.group(1)}->{m.group(2)}")
 
     return tags
+
+
+def _is_arrow_tag(text: str, m: re.Match) -> bool:
+    """
+    Is this arrow the schema's A→B tag, or an arrow in ordinary writing?
+
+    A tag is written compactly ("cause->effect", "A→B") or stands on a line
+    that holds nothing but tags ("Tags: #lean4 Noether → Witt"). A spaced
+    arrow inside a sentence ("Euclid 300 BCE -> infinite primes", "f: R -> R")
+    is prose (U4/F11).
+    """
+    if not any(ch.isspace() for ch in m.group(0)):
+        return True
+    start = text.rfind("\n", 0, m.start()) + 1
+    end = text.find("\n", m.end())
+    line = text[start:end if end != -1 else len(text)]
+    line = _ARROW_TAG.sub(" ", line)
+    line = _INLINE_TAG.sub(" ", line)
+    line = re.sub(r'(?i)^\s*(?:[*_#>]+\s*)?tags?\s*:', " ", line)
+    return not line.strip(" \t,;·•-*")
 
 
 # ── Section splitter helper ───────────────────────────────────────────────────
@@ -222,7 +245,7 @@ def _extract_section(text: str, *headers: str) -> str:
 
 
 # Fields that list tags or links — never a summary of the page.
-_NON_SUMMARY_FIELDS = {"tags_raw", "connections_raw"}
+_NON_SUMMARY_FIELDS = {"tags_raw", "connections_raw", "edition"}
 
 _TEMPLATE_ID_LINE = re.compile(r'^(RC|SYN|REV|DC|ISO|WA|AIEX)-?\d{1,4}[a-z]?\b', re.IGNORECASE)
 
@@ -236,7 +259,9 @@ def _first_content_line(raw_text: str) -> str:
         if not s or _ANY_LABEL.match(line):
             continue
         s = re.sub(r'^[#>*_\s]+', '', s).replace("**", "").strip()
-        if not s or (_TEMPLATE_ID_LINE.match(s) and len(s) <= 12):
+        # The printed edition mark ("v2.0 · Rev C") is not content either
+        bare = _EDITION_MARK.sub("", s).strip(" \t·•-–—|,")
+        if not bare or (_TEMPLATE_ID_LINE.match(bare) and len(bare) <= 12):
             continue
         return s
     return ""
@@ -409,7 +434,7 @@ def _positional_tags(
         if raw.strip("()[]-. ").casefold() in _PLACEHOLDERS:
             return  # "(none)", "n/a" — an empty section, not a tag
         value = normalize_tag_value(raw)
-        if not value or (prefix, value) in seen:
+        if not value or not any(ch.isalpha() for ch in value) or (prefix, value) in seen:
             return
         seen.add((prefix, value))
         extra.append({
@@ -441,6 +466,23 @@ def _positional_tags(
     return extra
 
 
+_EDITION_MARK = re.compile(
+    r'(?i)\bv\s?(\d+\.\d+)\s*[·•\-–—|,]?\s*rev\.?\s*([a-z])\b'
+)
+
+
+def extract_edition(text: str) -> str:
+    """
+    The journal's printed edition mark, normalized: "v2.0 · Rev C".
+
+    Rev C and later print it under the template ID on every template page
+    (the left grid pages are unmarked). Rev A and B pages have no mark, so
+    "" means "no mark read", not a particular printing.
+    """
+    m = _EDITION_MARK.search(text)
+    return f"v{m.group(1)} · Rev {m.group(2).upper()}" if m else ""
+
+
 def parse_template(template_type: str, raw_text: str) -> dict[str, Any]:
     """
     Parse *raw_text* using the appropriate template parser.
@@ -456,6 +498,12 @@ def parse_template(template_type: str, raw_text: str) -> dict[str, Any]:
         fields: dict[str, Any] = {"raw": raw_text}
     else:
         fields = parser(raw_text)
+
+    # The printed edition mark (Rev C onward) says which printing the page
+    # came from. Kept as a field, so export/import carry it with no schema change.
+    edition = extract_edition(raw_text)
+    if edition:
+        fields["edition"] = edition
 
     # Extract schema tags from the entire raw text (catches tags anywhere on the page)
     tags = extract_schema_tags(raw_text, template_type)
