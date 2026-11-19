@@ -34,7 +34,9 @@ Turn your handwritten journal photos into a searchable, AI-powered knowledge bas
 
 ## What it does
 
-The KSJ MCP server connects your knowledge — handwritten or digital — to an AI assistant via the **Model Context Protocol (MCP)** — an open standard for linking AI models to local tools and data.
+Some thoughts only show up when you pick up a pen. Writing by hand is slower than typing, and research suggests it engages the brain differently: you have to choose, compress and shape each idea as you form it. That is where insight tends to happen, and it's why the Knowledge Synthesis Journal is made of paper.
+
+The KSJ MCP server is the other half. It connects what you wrote by hand to an AI assistant, so those insights don't stay buried in a notebook. Photograph a page and your assistant can search it, link it to your other pages, and help you see the patterns across them. The connection runs through the **Model Context Protocol (MCP)**, an open standard for linking AI models to local tools and data, and everything stays on your own machine. The server is free and open source (MIT), so you can read exactly what it does with your pages.
 
 ### Physical journal → knowledge base
 
